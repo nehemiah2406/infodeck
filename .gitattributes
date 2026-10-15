@@ -1,0 +1,7 @@
+# Normalise line endings for text files
+* text=auto
+
+# Never touch binary files (line-ending conversion corrupts PDFs)
+*.pdf binary
+*.png binary
+*.jpg binary

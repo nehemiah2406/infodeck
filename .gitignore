@@ -1,0 +1,39 @@
+# ---- Secrets: NEVER commit ----
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# ---- Real company documents: NEVER commit ----
+# Every PDF/Office file is ignored except the fictional samples.
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.pptx
+!data/sample_docs/*.pdf
+data/uploads/
+
+# ---- Generated data ----
+# ChromaDB vector store (persistent folder)
+storage/
+chroma_db/
+*.sqlite3
+eval_results/
+
+# ---- Python / tools ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.ipynb_checkpoints/
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

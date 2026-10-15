@@ -1,0 +1,21 @@
+# InfoDeck dependencies (versions pinned to what was tested)
+# Install:  .venv\Scripts\python -m pip install -r requirements.txt
+
+# LLM providers
+anthropic==1.14.0          # Claude API (official SDK)
+ollama==0.6.3              # optional local backup LLM (client only; Ollama app installed separately)
+
+# Retrieval
+sentence-transformers==6.1.0   # local embedding model (pulls in torch, CPU build)
+chromadb==1.5.9                # local persistent vector store
+
+# Documents
+pdfplumber==0.11.10        # PDF text + table extraction with page numbers
+
+# App + config
+streamlit==1.66.0
+python-dotenv==1.2.4
+
+# Testing / tooling
+pytest==9.1.1
+reportlab==5.0.1           # only used to generate the fictional sample PDFs

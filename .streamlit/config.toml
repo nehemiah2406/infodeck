@@ -1,0 +1,18 @@
+[server]
+# 0.0.0.0 = accept connections from other computers on the office network
+address = "0.0.0.0"
+port = 8501
+headless = true
+maxUploadSize = 50   # MB
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Hide Streamlit's developer menu so users only see "InfoDeck"
+toolbarMode = "viewer"
+showErrorDetails = false
+
+[theme]
+base = "light"
+primaryColor = "#1F4E79"
