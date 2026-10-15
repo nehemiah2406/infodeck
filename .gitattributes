@@ -1,6 +1,9 @@
 # Normalise line endings for text files
 * text=auto
 
+# Windows batch files must keep CRLF line endings
+*.bat text eol=crlf
+
 # Never touch binary files (line-ending conversion corrupts PDFs)
 *.pdf binary
 *.png binary

@@ -1,0 +1,14 @@
+[project]
+name = "infodeck"
+version = "0.2.0"
+description = "InfoDeck: ask questions about company documents (RAG)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+# no:faulthandler - ChromaDB's native code raises (and handles) Windows exceptions that the
+# faulthandler plugin would print as scary "access violation" noise.
+addopts = "-q -m 'not slow' -p no:faulthandler"
+markers = ["slow: uses the real embedding model (run with: pytest -m slow)"]
+filterwarnings = ["ignore::DeprecationWarning"]

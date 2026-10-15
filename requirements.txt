@@ -11,6 +11,7 @@ chromadb==1.5.9                # local persistent vector store
 
 # Documents
 pdfplumber==0.11.10        # PDF text + table extraction with page numbers
+python-docx==1.2.0         # Word (.docx) files
 
 # App + config
 streamlit==1.66.0
