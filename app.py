@@ -25,7 +25,8 @@ from infodeck.store import Passage, VectorStore  # noqa: E402
 
 log = logging.getLogger("infodeck.app")
 
-TAGLINE = "Ask questions about your company documents"
+HEADLINE = "Every answer, straight from your documents"
+TAGLINE = "Ask questions about your company policies and files. Each answer cites the page it came from."
 MAX_UPLOAD_MB = 50
 SAMPLE_QUESTIONS = [
     "How many earned leave days do I get per year?",
@@ -41,18 +42,20 @@ st.set_page_config(page_title=APP_NAME, page_icon="📘", layout="centered",
 st.markdown(
     """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
 
 :root {
-    --ink: #0b0f1a;
-    --glass: rgba(255, 255, 255, 0.045);
-    --glass-strong: rgba(255, 255, 255, 0.07);
-    --glass-border: rgba(255, 255, 255, 0.11);
-    --text: #e7eaf3;
-    --muted: #9aa3b8;
-    --violet: #a78bfa;
-    --blue: #60a5fa;
-    --teal: #2dd4bf;
+    --ink: #050507;
+    --glass: rgba(255, 255, 255, 0.035);
+    --glass-strong: rgba(255, 255, 255, 0.06);
+    --line: rgba(255, 255, 255, 0.09);
+    --line-strong: rgba(255, 255, 255, 0.18);
+    --text: #ededef;
+    --muted: #8e8e98;
+    --orange: #ff7a45;
+    --red: #e2455a;
+    --violet: #8b6cff;
+    --blue: #5b7cfa;
 }
 
 /* ---------- Hide Streamlit chrome ---------- */
@@ -64,52 +67,81 @@ header[data-testid="stHeader"] { background: transparent !important; }
 /* Don't grey out the page while it updates */
 [data-stale="true"] { opacity: 1 !important; }
 
-/* ---------- Base + aurora background ---------- */
+/* ---------- Base + "new era" particle ring ---------- */
 html, body, .stApp, .stMarkdown, button, input, textarea, [data-testid="stWidgetLabel"] {
     font-family: 'Inter', system-ui, sans-serif !important;
 }
 .stApp { background: var(--ink); color: var(--text); }
+/* Ring of fine light strands: a conic colour wheel masked to a thin, streaky ring */
 .stApp::before {
-    content: ""; position: fixed; inset: -25%; z-index: 0; pointer-events: none;
+    content: ""; position: fixed; left: 50%; top: 38%; z-index: 0; pointer-events: none;
+    width: min(1150px, 150vw); aspect-ratio: 1; translate: -50% -50%;
+    background: conic-gradient(from 210deg, var(--orange), var(--red), var(--violet), var(--blue),
+                               var(--violet), var(--red), var(--orange));
+    -webkit-mask: radial-gradient(closest-side, transparent 56%, #000 63%, #000 70%, transparent 82%),
+                  repeating-conic-gradient(#000 0deg .3deg, transparent .3deg 1.05deg);
+    -webkit-mask-composite: source-in;
+    mask: radial-gradient(closest-side, transparent 56%, #000 63%, #000 70%, transparent 82%),
+          repeating-conic-gradient(#000 0deg .3deg, transparent .3deg 1.05deg);
+    mask-composite: intersect;
+    opacity: .5; filter: blur(.4px);
+    animation: drift 140s linear infinite;
+}
+/* Soft glow behind the strands, plus darkness in the middle so text stays readable */
+.stApp::after {
+    content: ""; position: fixed; left: 50%; top: 38%; z-index: 0; pointer-events: none;
+    width: min(1150px, 150vw); aspect-ratio: 1; translate: -50% -50%;
     background:
-        radial-gradient(38% 32% at 18% 22%, rgba(139, 92, 246, 0.42), transparent 70%),
-        radial-gradient(34% 30% at 82% 14%, rgba(59, 130, 246, 0.34), transparent 70%),
-        radial-gradient(40% 34% at 62% 88%, rgba(20, 184, 166, 0.30), transparent 70%);
-    filter: blur(48px);
-    animation: aurora 24s ease-in-out infinite alternate;
+        radial-gradient(closest-side, var(--ink) 48%, transparent 70%),
+        conic-gradient(from 210deg, rgba(255, 122, 69, .35), rgba(226, 69, 90, .3), rgba(139, 108, 255, .3),
+                       rgba(91, 124, 250, .35), rgba(139, 108, 255, .3), rgba(226, 69, 90, .3), rgba(255, 122, 69, .35));
+    border-radius: 50%; filter: blur(60px); opacity: .55;
+    animation: breathe 12s ease-in-out infinite alternate;
 }
-@keyframes aurora {
-    0%   { transform: translate3d(0, 0, 0) rotate(0deg) scale(1); }
-    50%  { transform: translate3d(3%, -2%, 0) rotate(8deg) scale(1.08); }
-    100% { transform: translate3d(-3%, 2%, 0) rotate(-6deg) scale(1.03); }
-}
+@keyframes drift   { to { rotate: 360deg; } }
+@keyframes breathe { from { scale: .96; opacity: .45; } to { scale: 1.04; opacity: .6; } }
 [data-testid="stAppViewContainer"], [data-testid="stMain"], [data-testid="stBottom"],
 [data-testid="stBottom"] > div, [data-testid="stBottomBlockContainer"] {
     background: transparent !important;
 }
 [data-testid="stAppViewContainer"] { position: relative; z-index: 1; }
-.block-container { padding-top: 2.6rem; max-width: 840px; }
+.block-container { padding-top: 3rem; max-width: 820px; }
 
-/* ---------- Title ---------- */
-.id-title {
-    font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 3rem;
-    letter-spacing: -0.03em; line-height: 1.1; margin: 0; display: inline-block;
-    background: linear-gradient(92deg, #c4b5fd 0%, #93c5fd 50%, #5eead4 100%);
+/* ---------- Hero ---------- */
+.id-hero { text-align: center; margin: 3.2rem 0 2.2rem 0; }
+.id-hero.compact { margin: .4rem 0 1.4rem 0; }
+.id-badge {
+    display: inline-flex; align-items: center; gap: .5rem; font-size: .8rem; color: #d4d4d8;
+    padding: .34rem .85rem; border-radius: 999px; background: rgba(255, 255, 255, .04);
+    border: 1px solid var(--line-strong); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+.id-badge .glyph { width: .55rem; height: .55rem; border-radius: 2px; rotate: 45deg;
+    background: linear-gradient(135deg, var(--orange), var(--blue)); }
+.id-headline {
+    font-weight: 300; font-size: clamp(2.2rem, 5.4vw, 3.6rem); line-height: 1.08; letter-spacing: -0.035em;
+    margin: 1.2rem 0 0 0;
+    background: linear-gradient(180deg, #ffffff 30%, #a1a1aa 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
 }
-.id-tagline { color: var(--muted); font-size: 1.05rem; margin: .35rem 0 1.6rem 0; }
-.id-side-title { font-size: 1.7rem; margin-bottom: .2rem; }
+.id-hero.compact .id-headline { font-size: 1.7rem; margin-top: .8rem; }
+.id-tagline { color: var(--muted); font-size: 1.02rem; line-height: 1.6; margin: 1rem auto 0 auto; max-width: 520px; }
+.id-hero.compact .id-tagline { display: none; }
 
-/* ---------- Sidebar (glass) ---------- */
+/* ---------- Sidebar (dark glass) ---------- */
 [data-testid="stSidebar"] {
-    background: rgba(13, 18, 32, 0.72) !important;
-    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
-    border-right: 1px solid var(--glass-border);
+    background: rgba(8, 8, 11, 0.78) !important;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-right: 1px solid var(--line);
 }
-[data-testid="stSidebar"] h3 { font-size: .8rem; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+.id-brand { display: flex; align-items: center; gap: .6rem; font-size: 1.35rem; font-weight: 600;
+    letter-spacing: -0.02em; color: #fafafa; margin-bottom: .3rem; }
+.id-brand .glyph { width: .8rem; height: .8rem; border-radius: 3px; rotate: 45deg;
+    background: linear-gradient(135deg, var(--orange), var(--blue)); box-shadow: 0 0 16px rgba(255, 122, 69, .45); }
+[data-testid="stSidebar"] h3 { font-size: .74rem; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
 [data-testid="stFileUploaderDropzone"] {
-    background: var(--glass) !important; border: 1px dashed rgba(167, 139, 250, 0.45) !important; border-radius: 14px;
+    background: var(--glass) !important; border: 1px dashed var(--line-strong) !important; border-radius: 16px;
 }
+[data-testid="stFileUploaderDropzone"]:hover { border-color: rgba(255, 122, 69, .55) !important; }
 .id-doc { font-size: .88rem; line-height: 1.3; color: var(--text); overflow-wrap: anywhere; }
 [data-testid="stSidebar"] [class*="st-key-ask_rm_"] button {
     padding: .1rem .5rem !important; min-height: 2rem; color: var(--muted) !important;
@@ -119,86 +151,87 @@ html, body, .stApp, .stMarkdown, button, input, textarea, [data-testid="stWidget
 
 /* AI-mode pill */
 .id-pill {
-    display: inline-flex; align-items: center; gap: .45rem; font-size: .8rem; font-weight: 600;
-    padding: .32rem .75rem; border-radius: 999px; margin: .4rem 0 .2rem 0;
+    display: inline-flex; align-items: center; gap: .45rem; font-size: .78rem; font-weight: 500;
+    padding: .3rem .75rem; border-radius: 999px; margin: .4rem 0 .2rem 0;
 }
-.id-pill .dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
-.id-pill.on  { background: rgba(45, 212, 191, 0.13); border: 1px solid rgba(45, 212, 191, 0.45); color: #5eead4; }
-.id-pill.off { background: rgba(251, 191, 36, 0.12); border: 1px solid rgba(251, 191, 36, 0.42); color: #fcd34d; }
+.id-pill .dot { width: .45rem; height: .45rem; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
+.id-pill.on  { background: rgba(91, 124, 250, 0.12); border: 1px solid rgba(91, 124, 250, 0.42); color: #b4c3ff; }
+.id-pill.off { background: rgba(255, 122, 69, 0.10); border: 1px solid rgba(255, 122, 69, 0.42); color: #ffb08f; }
 .id-pill-reason { font-size: .78rem; color: var(--muted); margin-bottom: .8rem; }
 
-/* ---------- Buttons ---------- */
+/* ---------- Buttons: outlined pills ---------- */
 .stButton > button, [data-testid="stPopover"] button {
-    background: var(--glass) !important; color: var(--text) !important;
-    border: 1px solid var(--glass-border) !important; border-radius: 10px !important;
-    transition: all .2s ease;
+    background: rgba(255, 255, 255, .03) !important; color: var(--text) !important;
+    border: 1px solid var(--line-strong) !important; border-radius: 999px !important;
+    transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease;
 }
-.stButton > button:hover { border-color: rgba(167, 139, 250, 0.6) !important; }
+.stButton > button:hover {
+    border-color: rgba(255, 255, 255, .42) !important; box-shadow: 0 0 22px rgba(255, 122, 69, .16);
+}
 .stButton > button[kind="primary"] {
-    background: linear-gradient(92deg, #7c3aed, #2563eb) !important; border: none !important; color: white !important;
+    background: #f4f4f5 !important; border: 1px solid #f4f4f5 !important; color: #09090b !important; font-weight: 500;
 }
-/* Example questions: glowing pills */
-.st-key-samples .stButton > button {
-    border-radius: 999px !important; padding: .45rem 1.05rem !important;
-    border: 1px solid rgba(167, 139, 250, 0.5) !important;
-    background: rgba(139, 92, 246, 0.10) !important; color: #ddd6fe !important;
-    box-shadow: 0 0 18px rgba(139, 92, 246, 0.22);
+.stButton > button[kind="primary"]:hover { background: #ffffff !important; }
+/* Example questions */
+.st-key-samples { justify-content: center; }
+.st-key-samples .stButton > button { padding: .5rem .7rem .5rem 1.1rem !important; color: #e4e4e7 !important; }
+.st-key-samples .stButton > button p::after {
+    content: "↗"; display: inline-grid; place-items: center; width: 1.45rem; height: 1.45rem; margin-left: .6rem;
+    border-radius: 50%; border: 1px solid var(--line-strong); font-size: .75rem; color: #d4d4d8;
 }
-.st-key-samples .stButton > button:hover {
-    box-shadow: 0 0 28px rgba(139, 92, 246, 0.50); transform: translateY(-1px);
-    border-color: rgba(196, 181, 253, 0.9) !important;
-}
-.id-hint { color: var(--muted); font-size: .85rem; margin-bottom: .4rem; }
+.st-key-samples .stButton > button:hover { transform: translateY(-1px); }
+.id-hint { color: var(--muted); font-size: .82rem; margin-bottom: .6rem; text-align: center; }
 
 /* ---------- Chat ---------- */
 [data-testid="stChatMessage"] {
-    background: var(--glass); border: 1px solid var(--glass-border); border-radius: 18px;
-    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-    padding: 1rem 1.1rem; margin-bottom: .8rem;
+    background: rgba(12, 12, 16, .55); border: 1px solid var(--line); border-radius: 20px;
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    padding: 1rem 1.15rem; margin-bottom: .8rem;
     animation: fadeUp .45s ease both;
 }
 [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
-    background: rgba(139, 92, 246, 0.12); border-color: rgba(167, 139, 250, 0.30);
+    background: rgba(255, 122, 69, 0.06); border-color: rgba(255, 140, 100, 0.22);
 }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-[data-testid="stChatMessage"] p, [data-testid="stChatMessage"] li { color: var(--text); line-height: 1.6; }
+[data-testid="stChatMessage"] p, [data-testid="stChatMessage"] li { color: var(--text); line-height: 1.65; }
 [data-testid="stChatInput"], [data-testid="stChatInput"] > div {
-    background: rgba(20, 26, 43, 0.85) !important; border-radius: 16px !important;
-    border-color: rgba(167, 139, 250, 0.35) !important;
+    background: rgba(12, 12, 16, 0.85) !important; border-radius: 22px !important;
+    border-color: var(--line-strong) !important;
 }
+[data-testid="stChatInput"]:focus-within > div { border-color: rgba(255, 122, 69, .55) !important; }
 [data-testid="stChatInput"] textarea { color: var(--text) !important; }
 
 /* Citation chips */
 .chip {
     display: inline-block; font-size: .72rem; font-weight: 500; line-height: 1.5; white-space: nowrap;
     padding: .05rem .55rem; margin: 0 .12rem; border-radius: 999px; vertical-align: 1px;
-    background: rgba(96, 165, 250, 0.14); border: 1px solid rgba(96, 165, 250, 0.38); color: #bfdbfe;
+    background: rgba(91, 124, 250, 0.13); border: 1px solid rgba(91, 124, 250, 0.38); color: #c7d2fe;
 }
-.chip.score { background: rgba(45, 212, 191, 0.10); border-color: rgba(45, 212, 191, 0.32); color: #99f6e4; }
+.chip.score { background: rgba(255, 122, 69, 0.10); border-color: rgba(255, 122, 69, 0.34); color: #ffc2a8; }
 
-/* Sources expander as glass card */
+/* Sources expander */
 [data-testid="stExpander"] details {
-    background: rgba(255, 255, 255, 0.035) !important; border: 1px solid var(--glass-border) !important;
-    border-radius: 14px !important; backdrop-filter: blur(12px);
+    background: rgba(255, 255, 255, 0.025) !important; border: 1px solid var(--line) !important;
+    border-radius: 16px !important; backdrop-filter: blur(12px);
 }
 [data-testid="stExpander"] summary { color: var(--muted); font-size: .88rem; }
 .id-source { margin: .2rem 0 .3rem 0; font-size: .82rem; color: var(--muted); }
 .id-passage {
-    background: rgba(255, 255, 255, 0.03); border-left: 2px solid var(--violet);
+    background: rgba(255, 255, 255, 0.025); border-left: 2px solid var(--orange);
     padding: .6rem .8rem; border-radius: 8px; font-size: .88rem; line-height: 1.55;
-    color: #d5dae7; margin: 0 0 .9rem 0;
+    color: #d4d4d8; margin: 0 0 .9rem 0;
 }
-.id-notice { color: #fcd34d; font-weight: 600; }
+.id-notice { color: #ffb08f; font-weight: 500; }
 
 /* Progress bar + spinner */
 [data-testid="stProgress"] div[role="progressbar"] > div > div {
-    background-image: linear-gradient(90deg, #8b5cf6, #3b82f6, #14b8a6) !important;
+    background-image: linear-gradient(90deg, var(--orange), var(--red), var(--violet), var(--blue)) !important;
 }
 [data-testid="stSpinner"] { color: var(--muted); }
-[data-testid="stAlert"] { background: var(--glass) !important; border: 1px solid var(--glass-border); border-radius: 12px; }
+[data-testid="stAlert"] { background: var(--glass) !important; border: 1px solid var(--line); border-radius: 14px; }
 
 @media (prefers-reduced-motion: reduce) {
-    .stApp::before, [data-testid="stChatMessage"] { animation: none !important; }
+    .stApp::before, .stApp::after, [data-testid="stChatMessage"] { animation: none !important; }
     .st-key-samples .stButton > button:hover { transform: none; }
 }
 </style>
@@ -314,7 +347,7 @@ ss.setdefault("upload_results", [])
 # Sidebar
 # --------------------------------------------------------------------------- #
 with st.sidebar:
-    st.markdown(f"<div class='id-title id-side-title'>{APP_NAME}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='id-brand'><span class='glyph'></span>{APP_NAME}</div>", unsafe_allow_html=True)
 
     status = resolve_llm(get_settings())
     if status.llm is not None:
@@ -384,8 +417,12 @@ with st.sidebar:
 # --------------------------------------------------------------------------- #
 # Main area: chat
 # --------------------------------------------------------------------------- #
-st.markdown(f"<div class='id-title'>{APP_NAME}</div><div class='id-tagline'>{TAGLINE}</div>",
-            unsafe_allow_html=True)
+st.markdown(
+    f"<div class='id-hero{' compact' if ss.messages else ''}'>"
+    f"<span class='id-badge'><span class='glyph'></span>{APP_NAME}</span>"
+    f"<div class='id-headline'>{HEADLINE}</div><div class='id-tagline'>{TAGLINE}</div></div>",
+    unsafe_allow_html=True,
+)
 
 if not docs:
     st.info("Upload a PDF, Word or text file in the sidebar to get started.")
