@@ -59,11 +59,16 @@ st.markdown(
 }
 
 /* ---------- Hide Streamlit chrome ---------- */
-#MainMenu, footer, [data-testid="stToolbar"], [data-testid="stAppDeployButton"], .stDeployButton,
+/* Only the toolbar's actions are hidden: the toolbar itself holds the "expand sidebar" button. */
+#MainMenu, footer, [data-testid="stToolbarActions"], [data-testid="stAppDeployButton"], .stDeployButton,
 [data-testid="stDecoration"], [data-testid="stStatusWidget"], [data-testid="stMainMenu"] {
     display: none !important;
 }
-header[data-testid="stHeader"] { background: transparent !important; }
+header[data-testid="stHeader"], [data-testid="stToolbar"] { background: transparent !important; }
+/* Keep the sidebar open/close buttons visible (test ids from Streamlit 1.66) */
+[data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapseButton"] {
+    display: flex !important; visibility: visible !important;
+}
 /* Don't grey out the page while it updates */
 [data-stale="true"] { opacity: 1 !important; }
 
@@ -300,6 +305,27 @@ def render_answer(ans: Answer) -> None:
                 render_passages(ans.passages)
 
 
+def ingest_files(engine: InfoDeckEngine, files) -> list[tuple[str, str]]:
+    """Index uploaded files with a progress bar; returns (message kind, text) pairs."""
+    results = []
+    bar = st.progress(0.0, text="Preparing...")
+    for i, f in enumerate(files):
+        bar.progress(i / len(files), text=f"Indexing {f.name} ({i + 1}/{len(files)})")
+        try:
+            if f.size > MAX_UPLOAD_MB * 1024 * 1024:
+                results.append(("error", f"{f.name} is larger than {MAX_UPLOAD_MB} MB."))
+                continue
+            r = engine.save_and_ingest_upload(f.name, f.getvalue())
+            results.append(("success" if r.status in ("added", "replaced") else
+                            "info" if r.status == "duplicate" else "error", r.message))
+            results += [("warning", w) for w in r.warnings if w != r.message]
+        except Exception:
+            log.exception("Upload failed for %s", f.name)
+            results.append(("error", f"{f.name} could not be added. Please try again."))
+    bar.progress(1.0, text="Done")
+    return results
+
+
 def answer_question(engine: InfoDeckEngine, question: str) -> Answer:
     """Retrieve, then answer with the LLM (streamed), or fall back to sources mode."""
     status = resolve_llm(get_settings())
@@ -362,23 +388,7 @@ with st.sidebar:
                              accept_multiple_files=True, key=f"uploader_{ss.uploader_key}",
                              label_visibility="collapsed")
     if files:
-        results = []
-        bar = st.progress(0.0, text="Preparing...")
-        for i, f in enumerate(files):
-            bar.progress(i / len(files), text=f"Indexing {f.name} ({i + 1}/{len(files)})")
-            try:
-                if f.size > MAX_UPLOAD_MB * 1024 * 1024:
-                    results.append(("error", f"{f.name} is larger than {MAX_UPLOAD_MB} MB."))
-                    continue
-                r = engine.save_and_ingest_upload(f.name, f.getvalue())
-                results.append(("success" if r.status in ("added", "replaced") else
-                                "info" if r.status == "duplicate" else "error", r.message))
-                results += [("warning", w) for w in r.warnings if w != r.message]
-            except Exception:
-                log.exception("Upload failed for %s", f.name)
-                results.append(("error", f"{f.name} could not be added. Please try again."))
-        bar.progress(1.0, text="Done")
-        ss.upload_results = results
+        ss.upload_results = ingest_files(engine, files)
         ss.uploader_key += 1  # clears the upload box
         st.rerun()
     for kind, msg in ss.upload_results:
@@ -425,7 +435,7 @@ st.markdown(
 )
 
 if not docs:
-    st.info("Upload a PDF, Word or text file in the sidebar to get started.")
+    st.info("Click + in the chat box (or use the sidebar) to add a PDF, Word or text file.")
 elif not ss.messages and any(d.file_name.startswith("KRT_") for d in docs):
     st.markdown("<div class='id-hint'>Try one of these</div>", unsafe_allow_html=True)
     with st.container(key="samples", horizontal=True):
@@ -441,9 +451,22 @@ for m in ss.messages:
         else:
             render_answer(m["answer"])
 
-typed = st.chat_input("Ask a question about your documents...", disabled=not docs)
-question = (typed or ss.pop("pending_question", "") or "").strip()
-if question:
+for kind, msg in ss.pop("chat_upload_results", []):
+    getattr(st, kind)(msg)
+
+typed = st.chat_input("Ask a question or attach a document...", accept_file="multiple",
+                      file_type=["pdf", "docx", "txt"])
+if typed and typed.files:
+    # Index the attached files first; a question typed with them is answered on the next run.
+    ss.upload_results = ss.chat_upload_results = ingest_files(engine, typed.files)
+    if typed.text.strip():
+        ss.pending_question = typed.text.strip()
+    st.rerun()
+
+question = ((typed.text if typed else "") or ss.pop("pending_question", "") or "").strip()
+if question and not docs:
+    st.warning("Please add a document first (use the + button).")
+elif question:
     ss.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(esc(question), unsafe_allow_html=True)

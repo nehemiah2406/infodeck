@@ -40,7 +40,7 @@ an AI. Instead, it first finds the few paragraphs that matter and sends only tho
 
 ## Features
 
-- Upload **PDF, DOCX and TXT** files. Tables are read row by row, and scanned PDFs with no text get a clear warning.
+- Upload **PDF, DOCX and TXT** files with the **"+" button** in the chat box or from the sidebar. Tables are read row by row, and scanned PDFs with no text get a clear warning.
 - Uploading the same file again is detected by its fingerprint (SHA-256 hash), so nothing is duplicated.
 - Answers cite **file + page**. A **Sources** panel shows the exact paragraphs that were used.
 - **Three AI modes**, chosen in `.env`:
