@@ -136,3 +136,13 @@ def test_unknown_provider_means_sources_mode():
 def test_api_key_present_selects_claude_without_network_call():
     status = resolve_llm(Settings(llm_provider="anthropic", anthropic_api_key="sk-ant-test-123456789"))
     assert status.mode == "claude" and "claude-sonnet-5-5" in status.label
+
+
+def test_gemini_without_key_means_sources_mode():
+    status = resolve_llm(Settings(llm_provider="gemini", gemini_api_key=""))
+    assert status.mode == "sources" and "Gemini" in status.reason
+
+
+def test_gemini_key_present_selects_gemini_without_network_call():
+    status = resolve_llm(Settings(llm_provider="gemini", gemini_api_key="AIza-test-123456789"))
+    assert status.mode == "gemini" and "gemini-2.5-flash" in status.label

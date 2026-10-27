@@ -3,6 +3,7 @@
 
 # LLM providers
 anthropic==1.14.0          # Claude API (official SDK)
+google-genai==2.33.0      # Gemini API (official Google SDK)
 ollama==0.6.3              # optional local backup LLM (client only; Ollama app installed separately)
 
 # Retrieval

@@ -103,12 +103,16 @@ The three sample PDFs load automatically the first time the app starts.
 **Free local alternative:** install [Ollama](https://ollama.com), run `ollama pull llama3.2:3b`,
 then set `LLM_PROVIDER=ollama` and `OLLAMA_MODEL=llama3.2:3b` in `.env`.
 
+**Google Gemini:** create a key at <https://aistudio.google.com/apikey>, then set
+`LLM_PROVIDER=gemini` and `GEMINI_API_KEY=your-key-here` in `.env`.
+
 ## Settings (`.env`)
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `LLM_PROVIDER` | `anthropic` | `anthropic` or `ollama` |
+| `LLM_PROVIDER` | `anthropic` | `anthropic`, `gemini` or `ollama` |
 | `CLAUDE_MODEL` | `claude-sonnet-5-5` | Claude model used for answers |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model used when `LLM_PROVIDER=gemini` |
 | `TOP_K` | `5` | Passages used per question |
 | `MIN_SCORE` | `0.55` | If the best passage scores lower than this, the answer is "not found" and no AI call is made |
 | `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L6-v2` | Set to `none` to switch re-ranking off |

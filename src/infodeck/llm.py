@@ -1,4 +1,4 @@
-"""LLM providers (Claude API, Ollama) behind one small interface.
+"""LLM providers (Claude API, Gemini API, Ollama) behind one small interface.
 
 Every provider exposes stream(system, user) -> iterator of text pieces.
 Errors are converted to LLMError with a friendly message that never contains
@@ -31,7 +31,7 @@ class LLM(Protocol):
 @dataclass
 class LLMStatus:
     llm: LLM | None
-    mode: str  # "claude" | "ollama" | "sources"
+    mode: str  # "claude" | "gemini" | "ollama" | "sources"
     label: str  # short text for the sidebar status line
     reason: str = ""  # why AI answers are off (sources mode only)
 
@@ -91,6 +91,48 @@ class ClaudeLLM:
 
 
 # --------------------------------------------------------------------------- #
+# Gemini (Google AI API)
+# --------------------------------------------------------------------------- #
+class GeminiLLM:
+    def __init__(self, api_key: str, model: str, client=None):
+        from google import genai
+        from google.genai import errors, types
+
+        self._errors = errors
+        self._types = types
+        self._client = client or genai.Client(api_key=api_key)
+        self.model = model
+        self.label = f"Gemini ({model})"
+
+    def stream(self, system: str, user: str) -> Iterator[str]:
+        e_ = self._errors
+        config = self._types.GenerateContentConfig(
+            system_instruction=system, temperature=0.1, max_output_tokens=2048
+        )
+        try:
+            for chunk in self._client.models.generate_content_stream(
+                model=self.model, contents=user, config=config
+            ):
+                if chunk.text:
+                    yield chunk.text
+        except e_.ClientError as e:
+            log.warning("Gemini client error (status %s)", e.code)
+            if e.code in (401, 403) or (e.code == 400 and "API key" in (e.message or "")):
+                raise LLMError("The Gemini API key in .env is not valid. Check GEMINI_API_KEY.") from None
+            if e.code == 404:
+                raise LLMError(f"Gemini model '{self.model}' was not found. Check GEMINI_MODEL in .env.") from None
+            if e.code == 429:
+                raise LLMError("Too many requests to Gemini right now. Please wait a minute and try again.") from None
+            raise LLMError("Gemini could not process this request. Please try a shorter question.") from None
+        except e_.APIError as e:
+            log.warning("Gemini API error (status %s)", e.code)
+            raise LLMError("The Gemini service is having problems. Please try again shortly.") from None
+        except Exception as e:  # httpx connection / timeout errors
+            log.warning("Gemini error: %s", type(e).__name__)
+            raise LLMError("Could not reach the Gemini API. Check the internet connection.") from None
+
+
+# --------------------------------------------------------------------------- #
 # Ollama (local)
 # --------------------------------------------------------------------------- #
 class OllamaLLM:
@@ -139,6 +181,16 @@ def resolve_llm(settings: Settings) -> LLMStatus:
             return LLMStatus(None, "sources", "Sources mode", "The Claude client could not be started.")
         return LLMStatus(llm, "claude", llm.label)
 
+    if provider == "gemini":
+        if not settings.gemini_api_key.strip():
+            return LLMStatus(None, "sources", "Sources mode", "No Gemini API key in .env yet.")
+        try:
+            llm = GeminiLLM(settings.gemini_api_key, settings.gemini_model)
+        except Exception:
+            log.exception("Could not create Gemini client")
+            return LLMStatus(None, "sources", "Sources mode", "The Gemini client could not be started.")
+        return LLMStatus(llm, "gemini", llm.label)
+
     if provider == "ollama":
         if not settings.ollama_model:
             return LLMStatus(None, "sources", "Sources mode", "OLLAMA_MODEL is not set in .env.")
@@ -154,4 +206,4 @@ def resolve_llm(settings: Settings) -> LLMStatus:
         return LLMStatus(llm, "ollama", llm.label)
 
     return LLMStatus(None, "sources", "Sources mode",
-                     f"Unknown LLM_PROVIDER '{provider}' in .env (use anthropic or ollama).")
+                     f"Unknown LLM_PROVIDER '{provider}' in .env (use anthropic, gemini or ollama).")

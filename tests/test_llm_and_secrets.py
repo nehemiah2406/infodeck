@@ -1,4 +1,4 @@
-"""Claude/Ollama wrappers with mocked clients, and API-key safety."""
+"""Claude/Gemini/Ollama wrappers with mocked clients, and API-key safety."""
 
 import logging
 from types import SimpleNamespace
@@ -9,7 +9,7 @@ import pytest
 
 import infodeck.config as config
 from infodeck.config import SecretRedactingFilter, Settings
-from infodeck.llm import ClaudeLLM, LLMError, OllamaLLM
+from infodeck.llm import ClaudeLLM, GeminiLLM, LLMError, OllamaLLM
 
 FAKE_KEY = "sk-ant-api03-THIS-IS-A-FAKE-KEY-0123456789"
 
@@ -120,3 +120,29 @@ def test_settings_are_read_from_env_file(tmp_path, monkeypatch):
     assert not s.has_api_key
     env.write_text("ANTHROPIC_API_KEY=abc123456789\n")  # pasting a key works without restart
     assert config.get_settings().has_api_key
+
+
+class FakeGeminiClient:
+    def __init__(self, texts, error=None):
+        self.models = self
+        self._texts, self._error = texts, error
+
+    def generate_content_stream(self, model, contents, config):
+        for t in self._texts:
+            yield SimpleNamespace(text=t)
+        if self._error:
+            raise self._error
+
+
+def test_gemini_streams_text_and_maps_errors_without_leaking_key():
+    from google.genai import errors
+
+    llm = GeminiLLM(FAKE_KEY, "gemini-2.5-flash", client=FakeGeminiClient(["Hello", None, " world"]))
+    assert "".join(llm.stream("s", "u")) == "Hello world"
+    for code, match in [(403, "GEMINI_API_KEY"), (404, "GEMINI_MODEL"), (429, "Too many"), (503, "problems")]:
+        error_cls = errors.ClientError if code < 500 else errors.ServerError
+        error = error_cls(code, {"error": {"message": f"bad {FAKE_KEY}"}})
+        llm = GeminiLLM(FAKE_KEY, "m", client=FakeGeminiClient([], error=error))
+        with pytest.raises(LLMError, match=match) as info:
+            list(llm.stream("s", "u"))
+        assert FAKE_KEY not in str(info.value)

@@ -29,6 +29,8 @@ class Settings:
     anthropic_api_key: str = field(default="", repr=False)
     claude_model: str = "claude-sonnet-5-5"
     claude_effort: str = "low"
+    gemini_api_key: str = field(default="", repr=False)
+    gemini_model: str = "gemini-2.5-flash"
     ollama_model: str = ""
     ollama_host: str = "http://localhost:11434"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -60,6 +62,8 @@ def get_settings() -> Settings:
         anthropic_api_key=get("ANTHROPIC_API_KEY", ""),
         claude_model=get("CLAUDE_MODEL", "claude-sonnet-5-5"),
         claude_effort=get("CLAUDE_EFFORT", "low"),
+        gemini_api_key=get("GEMINI_API_KEY", ""),
+        gemini_model=get("GEMINI_MODEL", "gemini-2.5-flash"),
         ollama_model=get("OLLAMA_MODEL", ""),
         ollama_host=get("OLLAMA_HOST", "http://localhost:11434"),
         embedding_model=get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
@@ -79,7 +83,7 @@ def get_settings() -> Settings:
 class SecretRedactingFilter(logging.Filter):
     """Replaces any API key that slips into a log message with '***'."""
 
-    def __init__(self, secrets_getter=lambda: [get_settings().anthropic_api_key]):
+    def __init__(self, secrets_getter=lambda: [get_settings().anthropic_api_key, get_settings().gemini_api_key]):
         super().__init__()
         self._secrets_getter = secrets_getter
 

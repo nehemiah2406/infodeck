@@ -76,8 +76,8 @@ There are two layers of protection against made-up answers:
 | **pytest** | Tests | The LLM is replaced by a fake in tests, so they run with no API key, no internet and no cost. |
 | **reportlab** | Generates the sample PDFs | Creates realistic fictional policy documents for development and evaluation. |
 
-**Switching the LLM:** set `LLM_PROVIDER=anthropic` or `LLM_PROVIDER=ollama` in `.env`.
-Both are wrapped behind one small interface (`generate(system, prompt) -> text`), so the
+**Switching the LLM:** set `LLM_PROVIDER=anthropic`, `LLM_PROVIDER=gemini` or `LLM_PROVIDER=ollama` in `.env`.
+All are wrapped behind one small interface (`generate(system, prompt) -> text`), so the
 rest of the code doesn't change.
 
 ---
