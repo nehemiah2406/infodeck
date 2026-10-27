@@ -1,6 +1,7 @@
 """Claude/Gemini/Ollama wrappers with mocked clients, and API-key safety."""
 
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 
 import anthropic
@@ -9,7 +10,7 @@ import pytest
 
 import infodeck.config as config
 from infodeck.config import SecretRedactingFilter, Settings
-from infodeck.llm import ClaudeLLM, GeminiLLM, LLMError, OllamaLLM
+from infodeck.llm import ClaudeLLM, GeminiLLM, LLMError, OllamaLLM, resolve_llm
 
 FAKE_KEY = "sk-ant-api03-THIS-IS-A-FAKE-KEY-0123456789"
 
@@ -142,7 +143,64 @@ def test_gemini_streams_text_and_maps_errors_without_leaking_key():
     for code, match in [(403, "GEMINI_API_KEY"), (404, "GEMINI_MODEL"), (429, "Too many"), (503, "problems")]:
         error_cls = errors.ClientError if code < 500 else errors.ServerError
         error = error_cls(code, {"error": {"message": f"bad {FAKE_KEY}"}})
-        llm = GeminiLLM(FAKE_KEY, "m", client=FakeGeminiClient([], error=error))
+        llm = GeminiLLM(FAKE_KEY, "m", client=FakeGeminiClient([], error=error), sleep=lambda s: None)
         with pytest.raises(LLMError, match=match) as info:
             list(llm.stream("s", "u"))
         assert FAKE_KEY not in str(info.value)
+
+
+class CountingGeminiClient:
+    """Fails with the given errors first, then streams the texts; counts the calls."""
+
+    def __init__(self, fail, texts=("ok",)):
+        self.models = self
+        self.fail, self.texts, self.calls = list(fail), texts, 0
+
+    def generate_content_stream(self, model, contents, config):
+        self.calls += 1
+        if self.fail:
+            raise self.fail.pop(0)
+        for t in self.texts:
+            yield SimpleNamespace(text=t)
+
+
+def daily_quota_error():
+    from google.genai import errors
+
+    return errors.ClientError(429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "details": [
+        {"violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},
+        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "82863s"}]}})
+
+
+def test_used_up_gemini_quota_fails_at_once_and_is_not_called_again():
+    waits = []
+    client = CountingGeminiClient([daily_quota_error()])
+    llm = GeminiLLM(FAKE_KEY, "gemini-3.8-flash", client=client, sleep=waits.append)
+    with pytest.raises(LLMError, match="used up for today"):
+        list(llm.stream("s", "u"))
+    assert client.calls == 1 and waits == []  # no retry, no waiting
+
+    s = replace(Settings(), llm_provider="gemini", gemini_api_key=FAKE_KEY, gemini_model="gemini-3.8-flash")
+    status = resolve_llm(s)  # every later question: straight to sources mode, Gemini is not called
+    assert status.llm is None and "used up for today" in status.reason and "restarted" in status.reason
+    assert FAKE_KEY not in status.reason
+    other = resolve_llm(replace(s, gemini_api_key="another-key-123456"))  # a new key in .env is tried
+    assert other.llm is not None
+
+
+def test_short_gemini_rate_limit_is_still_retried_briefly():
+    from google.genai import errors
+
+    burst = errors.ClientError(429, {"error": {"code": 429, "message": "Resource exhausted", "details": [
+        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "3s"}]}})
+    waits = []
+    client = CountingGeminiClient([burst, burst], texts=("Hello",))
+    llm = GeminiLLM(FAKE_KEY, "m", client=client, sleep=waits.append)
+    assert "".join(llm.stream("s", "u")) == "Hello"
+    assert client.calls == 3 and waits == [4.0, 4.0]  # Google's retryDelay + 1 s, capped at 10 s
+
+
+def test_gemini_sdk_does_not_retry_429_itself():
+    from infodeck.llm import GEMINI_SDK_RETRY_CODES
+
+    assert 429 not in GEMINI_SDK_RETRY_CODES

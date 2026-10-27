@@ -43,6 +43,8 @@ def test_trail_for_ai_answer_uses_real_counts_and_number_check():
 def test_trail_for_sources_and_not_found():
     quota = Answer("", "sources", note="AI answer failed: The Gemini quota for this API key is used up for today.")
     assert trail_steps(quota, Trace(docs=2, retrieved=[passage()]))[-1] == ("Quota used up", "warn")
+    shown = Answer("", "sources", [passage()] * 3, note="No key")  # 5 retrieved, the best 3 shown
+    assert trail_steps(shown, Trace(retrieved=[passage()] * 5))[1][0] == "Found 3 passages"
     assert trail_steps(Answer("", "sources", note="No key"), Trace())[-1] == ("AI off", "warn")
     assert trail_steps(Answer(NOT_FOUND, "not_found"), Trace(docs=3))[-1][1] == "bad"
 

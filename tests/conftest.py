@@ -58,6 +58,14 @@ class FakeLLM:
             yield word + " "
 
 
+@pytest.fixture(autouse=True)
+def no_used_up_quotas(monkeypatch):
+    """Each test starts without remembered used-up Gemini quotas."""
+    from infodeck import llm
+
+    monkeypatch.setattr(llm, "_used_up_quotas", {})
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return replace(

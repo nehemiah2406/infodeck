@@ -8,14 +8,28 @@ runs in "sources mode" (shows matching passages instead of AI answers).
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
 from .config import Settings
 
 log = logging.getLogger(__name__)
+
+# The Gemini SDK retries only server errors. 429 is handled in GeminiLLM.stream(): a used-up daily
+# quota must fail at once (retrying it only made answers take 6-28 s), a short burst is retried.
+GEMINI_SDK_RETRY_CODES = [500, 503]
+GEMINI_RATE_LIMIT_RETRIES = 2
+GEMINI_RATE_LIMIT_MAX_WAIT = 10.0  # seconds per wait
+# Used-up Gemini quotas, kept until the app restarts: hash of (API key, model) -> message.
+_used_up_quotas: dict[str, str] = {}
+
+
+def _quota_key(api_key: str, model: str) -> str:
+    return hashlib.sha256(f"{api_key}|{model}".encode()).hexdigest()
 
 
 class LLMError(Exception):
@@ -94,47 +108,62 @@ class ClaudeLLM:
 # Gemini (Google AI API)
 # --------------------------------------------------------------------------- #
 class GeminiLLM:
-    def __init__(self, api_key: str, model: str, client=None):
+    def __init__(self, api_key: str, model: str, client=None, sleep: Callable[[float], None] = time.sleep):
         from google import genai
         from google.genai import errors, types
 
         self._errors = errors
         self._types = types
-        # A busy server (429/503) is retried a few times before the answer falls back to sources mode.
-        retry = types.HttpRetryOptions(attempts=3, http_status_codes=[429, 500, 503])
+        # A busy server (500/503) is retried a few times before the answer falls back to sources mode.
+        retry = types.HttpRetryOptions(attempts=3, http_status_codes=GEMINI_SDK_RETRY_CODES)
         self._client = client or genai.Client(api_key=api_key, http_options=types.HttpOptions(retry_options=retry))
         self.model = model
         self.label = f"Gemini ({model})"
+        self._quota_key = _quota_key(api_key, model)
+        self._sleep = sleep
 
     def stream(self, system: str, user: str) -> Iterator[str]:
+        from .gemini_parser import quota_exhausted_message, suggested_delay
+
         e_ = self._errors
         config = self._types.GenerateContentConfig(
             system_instruction=system, temperature=0.1, max_output_tokens=2048
         )
-        try:
-            for chunk in self._client.models.generate_content_stream(
-                model=self.model, contents=user, config=config
-            ):
-                if chunk.text:
-                    yield chunk.text
-        except e_.ClientError as e:
-            log.warning("Gemini client error (status %s)", e.code)
-            if e.code in (401, 403) or (e.code == 400 and "API key" in (e.message or "")):
-                raise LLMError("The Gemini API key in .env is not valid. Check GEMINI_API_KEY.") from None
-            if e.code == 404:
-                raise LLMError(f"Gemini model '{self.model}' was not found. Check GEMINI_MODEL in .env.") from None
-            if e.code == 429:
-                from .gemini_parser import quota_exhausted_message
-
-                quota = quota_exhausted_message(e)
-                raise LLMError(quota or "Too many requests to Gemini right now. Please wait a minute and try again.") from None
-            raise LLMError("Gemini could not process this request. Please try a shorter question.") from None
-        except e_.APIError as e:
-            log.warning("Gemini API error (status %s)", e.code)
-            raise LLMError("The Gemini service is having problems. Please try again shortly.") from None
-        except Exception as e:  # httpx connection / timeout errors
-            log.warning("Gemini error: %s", type(e).__name__)
-            raise LLMError("Could not reach the Gemini API. Check the internet connection.") from None
+        for attempt in range(1, GEMINI_RATE_LIMIT_RETRIES + 2):
+            started = False
+            try:
+                for chunk in self._client.models.generate_content_stream(
+                    model=self.model, contents=user, config=config
+                ):
+                    if chunk.text:
+                        started = True
+                        yield chunk.text
+                return
+            except e_.ClientError as e:
+                log.warning("Gemini client error (status %s)", e.code)
+                if e.code in (401, 403) or (e.code == 400 and "API key" in (e.message or "")):
+                    raise LLMError("The Gemini API key in .env is not valid. Check GEMINI_API_KEY.") from None
+                if e.code == 404:
+                    raise LLMError(f"Gemini model '{self.model}' was not found. Check GEMINI_MODEL in .env.") from None
+                if e.code == 429:
+                    quota = quota_exhausted_message(e)
+                    if quota:  # no retry, and no more calls until the app restarts (see resolve_llm)
+                        _used_up_quotas[self._quota_key] = quota
+                        raise LLMError(quota) from None
+                    if started or attempt > GEMINI_RATE_LIMIT_RETRIES:
+                        raise LLMError("Too many requests to Gemini right now. Please wait a minute and try again.") from None
+                    delay = suggested_delay(e)
+                    delay = min(delay + 1 if delay is not None else 2.0 * attempt, GEMINI_RATE_LIMIT_MAX_WAIT)
+                    log.info("Gemini rate limit reached; waiting %.0f s before retrying (attempt %d)", delay, attempt)
+                    self._sleep(delay)
+                    continue
+                raise LLMError("Gemini could not process this request. Please try a shorter question.") from None
+            except e_.APIError as e:
+                log.warning("Gemini API error (status %s)", e.code)
+                raise LLMError("The Gemini service is having problems. Please try again shortly.") from None
+            except Exception as e:  # httpx connection / timeout errors
+                log.warning("Gemini error: %s", type(e).__name__)
+                raise LLMError("Could not reach the Gemini API. Check the internet connection.") from None
 
 
 # --------------------------------------------------------------------------- #
@@ -189,6 +218,10 @@ def resolve_llm(settings: Settings) -> LLMStatus:
     if provider == "gemini":
         if not settings.gemini_api_key.strip():
             return LLMStatus(None, "sources", "Sources mode", "No Gemini API key in .env yet.")
+        used_up = _used_up_quotas.get(_quota_key(settings.gemini_api_key, settings.gemini_model))
+        if used_up:
+            return LLMStatus(None, "sources", "Sources mode",
+                             f"{used_up} AI answers stay off until the app is restarted.")
         try:
             llm = GeminiLLM(settings.gemini_api_key, settings.gemini_model)
         except Exception:

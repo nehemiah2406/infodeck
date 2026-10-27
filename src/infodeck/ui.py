@@ -84,7 +84,8 @@ def trail_steps(ans: Answer, trace: Trace) -> list[tuple[str, str]]:
     if ans.mode == "sources":
         why = "Quota used up" if is_quota(ans.note) else "AI answer failed" if ans.note.startswith("AI answer failed") \
             else "AI off"
-        return [searched, (f"Found {plural(len(trace.retrieved), 'passage')}", "ok"), (why, "warn")]
+        # The passages shown (sources mode shows the best few), so the count matches "All passages (N)"
+        return [searched, (f"Found {plural(len(ans.passages), 'passage')}", "ok"), (why, "warn")]
     if ans.mode == "not_found":
         return [searched, ("No match in the documents", "bad")]
     return [("Something went wrong", "bad")]

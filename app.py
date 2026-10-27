@@ -63,18 +63,10 @@ def get_engine() -> InfoDeckEngine:
     return engine
 
 
-@st.cache_resource(show_spinner=False)
-def ai_flags() -> dict:
-    """Shared by all users: was the last AI call stopped by a used-up quota?"""
-    return {"quota": False}
-
-
 def ai_pill(status) -> tuple[str, str, str]:
     """(label, tone, tooltip) for the AI status pill in the top bar."""
     if status.llm is None:
-        return "AI off", "warn", status.reason
-    if ai_flags()["quota"]:
-        return "Quota used up", "warn", "The last AI answer failed because the quota is used up."
+        return ("Quota used up" if is_quota(status.reason) else "AI off"), "warn", status.reason
     return f"{AI_MODES.get(status.mode, status.label)} ready", "ok", status.label
 
 
@@ -363,9 +355,7 @@ def _answer_question(engine: InfoDeckEngine, question: str, skeleton, trace: Tra
             text = st.write_stream(stream())
     live.empty()  # replaced by the final, formatted answer card
     if errors:
-        ai_flags()["quota"] = is_quota(errors[0])
         return engine.sources_answer(passages, f"AI answer failed: {errors[0]}")
-    ai_flags()["quota"] = False
     return engine.finish_llm_answer(status, text if isinstance(text, str) else "".join(text), passages, question)
 
 
