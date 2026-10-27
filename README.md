@@ -52,7 +52,9 @@ an AI. Instead, it first finds the few paragraphs that matter and sends only tho
 
 - Upload files with the **"+" button** in the chat box or from the sidebar (see
   [Supported files](#supported-files)). Tables are read row by row; scanned pages and photos are
-  read with OCR. A progress bar shows *page X of N* while a document is read.
+  read with OCR, several pages at once.
+- **Background reading:** uploads are read in the background, one file at a time. The sidebar
+  shows *Reading file: page X of N*, and you can already ask about the pages that are done.
 - **Exact values:** lines such as `(1) Push-up distance, 10.6 mm` or
   `σra = Pd / Pr x σr = 111 N/mm²`, variable lists and Q&A pairs are indexed separately. A
   matching question is answered straight from the document line (pill **Exact value**),
@@ -142,6 +144,13 @@ then set `LLM_PROVIDER=ollama` and `OLLAMA_MODEL=llama3.2:3b` in `.env`.
 
 - **`local` (default):** everything stays on this computer. Scanned pages are read with local OCR
   (`rapidocr`). Good for clean scans; it can still misread a character (see Known limits).
+  - **Speed:** OCR is ~95% of the upload time, so `OCR_WORKERS` (default 6) worker processes read
+    scanned pages at the same time, at `OCR_DPI` (default 200). Keep the laptop **plugged in**:
+    on battery Windows slows OCR down 2.5-4x.
+  - **Big PDFs:** finished pages become searchable in small batches while the rest is still
+    read (the answer then says which document is still loading). Files are read one after
+    another. Removing a document that is loading stops it; if the app is closed while reading,
+    uploading the same file again continues from the pages already read.
 - **`gemini`:** every PDF page and image is rendered at **200 dpi** and only the **image** is sent to
   Gemini (`GEMINI_MODEL`, `GEMINI_API_KEY`), which writes faithful Markdown: tables as tables,
   formulas exactly as printed, numbered items and Q&A pairs kept together, short notes for
@@ -175,6 +184,8 @@ These files are also the parse cache. Delete a document's folder to force it to 
 | `CLAUDE_MODEL` | `claude-sonnet-5-5` | Claude model used for answers |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Gemini model used when `LLM_PROVIDER=gemini` or `PARSER=gemini` |
 | `PARSER` | `local` | `local` (text + local OCR) or `gemini` (page images read by Gemini, see above) |
+| `OCR_WORKERS` | `6` | Scanned pages OCR'd at the same time (`1` = one by one, no extra processes) |
+| `OCR_DPI` | `200` | Page image resolution for local OCR (150 lost accuracy in the evaluation; 300 was not better) |
 | `TOP_K` | `5` | Passages used per question |
 | `MIN_SCORE` | `0.55` | If the best passage scores lower than this, the answer is "not found" and no AI call is made |
 | `FACT_MATCH_SCORE` | `0.80` | A question at least this similar to a stored value name or Q&A question gets an **Exact value** answer without the AI |
@@ -210,6 +221,20 @@ text, so the app cannot catch this; the document carries a "read with OCR" warni
 scan must be checked. `TOP_K` stays at **5**: raising it to 8 could not be measured fairly because the Gemini free-tier daily quota ran out during the comparison (see
 Known limits). The `--parser gemini` run is still to do for the same reason.
 
+### Upload speed (scanned PDFs, `PARSER=local`)
+
+Fictional 20-page scanned PDF, laptop on the charger (i5-1235U, 10 cores), old and new code
+measured alternately on 2026-10-27:
+
+| | Before (one page at a time) | After (`OCR_WORKERS=6`, background reading) |
+|---|---|---|
+| 20 pages | 87-91 s | 52-54 s (56-67 s for the first upload, while the workers start) |
+| First answers possible after | the whole file (87-91 s) | 25-34 s |
+| 204 pages (estimate) | ~15 min | ~9 min, first answers after ~30 s |
+
+In a cooler run the same PDF took 79 s before and 42 s after. On battery, everything is
+2.5-4x slower.
+
 ### Retrieval on the policy PDFs
 
 `eval/retrieval_questions.csv` contains 10 questions about the sample PDFs: 6 answerable, 2 worded
@@ -235,22 +260,24 @@ also reject real questions, so `0.55` was kept. With Claude enabled, the prompt 
 ## Tests
 
 ```powershell
-.venv\Scripts\python -m pytest            # 70 fast tests, LLM and Gemini mocked
+.venv\Scripts\python -m pytest            # 80 fast tests, LLM and Gemini mocked
 .venv\Scripts\python -m pytest -m slow    # 6 tests with the real embedding + re-ranking models
 ```
 
 The tests cover every file loader, local OCR, Gemini page parsing with a fake client (only
 images sent, 429 retry, cache, resume), structure-aware chunking, exact-value extraction and
 answers, near-miss questions that must not match, the number check, duplicate uploads, the
-"not found" rule, sources mode, LLM error handling and API-key safety.
+"not found" rule, sources mode, LLM error handling and API-key safety, and fast uploads
+(parallel OCR gives the same text, one file at a time, no second job for the same file,
+questions while loading, stop, resume).
 
 ## Project structure
 
 ```
 app.py                  Streamlit UI (InfoDeck)
 run.bat                 Double-click launcher (LAN mode)
-src/infodeck/           loaders (+ OCR), parsing, gemini_parser, chunking, facts, embeddings,
-                        store, llm, prompts, engine
+src/infodeck/           loaders, ocr (parallel OCR), jobs (background queue), parsing,
+                        gemini_parser, chunking, facts, embeddings, store, llm, prompts, engine
 scripts/                ingest_docs.py, ask.py (command line), eval.py, make_sample_docs.py,
                         make_eval_docs.py
 eval/                   questions.csv (answers), retrieval_questions.csv, run_eval.py, results.md
@@ -272,6 +299,9 @@ data/eval_docs/         fictional engineering documents for scripts/eval.py
 - **Local OCR can misread a character.** In the evaluation it read `1,118,355` as `1,118,35`.
   OCR'd pages get a warning; use `PARSER=gemini` (if allowed for the document) or check the
   saved page file in `storage/parsed/` for critical values.
+- **Uploading a big scan uses most of the CPU.** With `OCR_WORKERS=6` the laptop stays usable,
+  but a 200-page scan still takes several minutes (see "Upload speed" below). While a
+  document loads, its repeated headers/footers are detected from its first 6 pages only.
 - **Exact-value answers are strict on purpose.** Every content word of the question must appear in
   the value's name (or item title / Q&A pair). Differently worded questions fall back to the
   normal AI answer, which is safer than showing the wrong value.

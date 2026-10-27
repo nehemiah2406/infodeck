@@ -9,6 +9,7 @@ import html
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -28,6 +29,7 @@ log = logging.getLogger("infodeck.app")
 HEADLINE = "Every answer, straight from your documents"
 TAGLINE = "Ask questions about your company policies and files. Each answer cites the page it came from."
 MAX_UPLOAD_MB = 200
+SMALL_FILE_WAIT_SECONDS = 5  # after an upload, wait this long so quick files show their result at once
 UPLOAD_TYPES = ["pdf", "docx", "txt", "xlsx", "csv", "pptx", "png", "jpg", "jpeg"]
 SAMPLE_QUESTIONS = [
     "How many earned leave days do I get per year?",
@@ -312,6 +314,12 @@ def render_exact(ans: Answer) -> None:
 
 
 def render_answer(ans: Answer) -> None:
+    _render_answer(ans)
+    if ans.loading:
+        st.caption(f"⏳ {ans.loading}")
+
+
+def _render_answer(ans: Answer) -> None:
     if ans.mode == "not_found":
         st.markdown(NOT_FOUND)
         st.caption("Try rephrasing the question, or upload the document that contains the answer.")
@@ -335,34 +343,93 @@ def render_answer(ans: Answer) -> None:
                 render_passages(ans.passages)
 
 
+def result_messages(r) -> list[tuple[str, str]]:
+    """(message kind, text) pairs for an IngestResult."""
+    kind = ("success" if r.status in ("added", "replaced") else
+            "info" if r.status in ("duplicate", "loading", "cancelled") else "error")
+    return [(kind, r.message)] + [("warning", w) for w in r.warnings if w != r.message]
+
+
+def job_text(job) -> str:
+    if job.status == "running" and job.total:
+        return f"Reading {job.file_name}: page {job.done} of {job.total}"
+    return f"Waiting: {job.file_name} (files are read one at a time)"
+
+
 def ingest_files(engine: InfoDeckEngine, files) -> list[tuple[str, str]]:
-    """Index uploaded files with a progress bar; returns (message kind, text) pairs."""
-    results = []
-    bar = st.progress(0.0, text="Preparing...")
-    for i, f in enumerate(files):
-        bar.progress(i / len(files), text=f"Indexing {f.name} ({i + 1}/{len(files)})")
+    """Queue uploaded files to be read in the background, one at a time.
 
-        def progress(done: int, total: int, note: str, i=i, name=f.name) -> None:
-            text = f"Reading {name}: page {min(done + 1, total)} of {total}" if done < total else \
-                f"Indexing {name} ({total} pages read)"
-            bar.progress(min((i + done / max(total, 1)) / len(files), 1.0), text=f"{text}. {note}".strip(" ."))
-
+    Quick files are waited for a few seconds so their result shows right away; big ones keep
+    loading (progress in the sidebar) while the user can already ask about finished pages.
+    """
+    results, queued = [], []
+    for f in files:
         try:
             if f.size > MAX_UPLOAD_MB * 1024 * 1024:
                 results.append(("error", f"{f.name} is larger than {MAX_UPLOAD_MB} MB."))
                 continue
-            r = engine.save_and_ingest_upload(f.name, f.getvalue(), progress)
-            results.append(("success" if r.status in ("added", "replaced") else
-                            "info" if r.status == "duplicate" else "error", r.message))
-            results += [("warning", w) for w in r.warnings if w != r.message]
+            r = engine.queue_upload(f.name, f.getvalue())
         except Exception:
             log.exception("Upload failed for %s", f.name)
             results.append(("error", f"{f.name} could not be added. Please try again."))
-    bar.progress(1.0, text="Done")
+            continue
+        if r.status == "queued":
+            queued.append(r.doc_id)
+        else:
+            results += result_messages(r)
+    if queued:
+        bar = st.progress(0.0, text="Reading...")
+        deadline = time.monotonic() + SMALL_FILE_WAIT_SECONDS
+        while time.monotonic() < deadline and any(engine.jobs.get(d).active for d in queued):
+            running = next((j for j in engine.jobs.active() if j.status == "running"), None)
+            if running:
+                bar.progress(running.done / max(running.total, 1), text=job_text(running))
+            time.sleep(0.25)
+        bar.empty()
+        for d in queued:
+            job = engine.jobs.get(d)
+            if job.active:
+                ss.watch.add(d)
+                results.append(("info", f"Reading {job.file_name} in the background (progress below). "
+                                        "You can already ask about the pages that are done."))
+            else:
+                results += result_messages(job.result)
     return results
 
 
+@st.fragment(run_every=2)
+def loading_panel(engine: InfoDeckEngine) -> None:
+    """Live 'page X of N' progress for documents being read; refreshes the page when one finishes."""
+    jobs = engine.jobs.active()
+    for job in jobs:
+        c1, c2 = st.columns([6, 1], vertical_alignment="center")
+        c1.progress(job.done / job.total if job.total else 0.0, text=job_text(job))
+        if c2.button("✕", key=f"stop_{job.doc_id}", help=f"Stop reading {job.file_name} and remove it"):
+            engine.remove_document(job.doc_id)
+            st.rerun(scope="app")
+    finished = [d for d in ss.watch if not engine.jobs.get(d).active]
+    for d in finished:
+        ss.watch.discard(d)
+        result = engine.jobs.get(d).result
+        if result is not None:
+            ss.upload_results = ss.upload_results + result_messages(result)
+    # Refresh the whole page when a job starts, finishes, or its first pages become searchable.
+    signature = (engine.jobs.finished_count,
+                 tuple((j.doc_id, j.status, engine.store.has_document(j.doc_id)) for j in jobs))
+    changed = ss.get("jobs_signature") not in (None, signature)
+    ss.jobs_signature = signature
+    if finished or changed:
+        st.rerun(scope="app")
+
+
 def answer_question(engine: InfoDeckEngine, question: str) -> Answer:
+    loading = engine.loading_note()  # documents still being read are only partly searchable
+    ans = _answer_question(engine, question)
+    ans.loading = loading
+    return ans
+
+
+def _answer_question(engine: InfoDeckEngine, question: str) -> Answer:
     """Exact value if one matches; else retrieve, then answer with the LLM (streamed) or sources mode."""
     exact = engine.exact_answer(question)
     if exact:
@@ -407,6 +474,7 @@ ss = st.session_state
 ss.setdefault("messages", [])
 ss.setdefault("uploader_key", 0)
 ss.setdefault("upload_results", [])
+ss.setdefault("watch", set())  # documents this browser tab uploaded that are still being read
 
 # --------------------------------------------------------------------------- #
 # Sidebar
@@ -435,6 +503,7 @@ with st.sidebar:
         st.rerun()
     for kind, msg in ss.upload_results:
         getattr(st, kind)(msg)
+    loading_panel(engine)
 
     docs = engine.store.list_documents()
     st.subheader(f"Documents ({len(docs)})")
@@ -442,8 +511,11 @@ with st.sidebar:
         st.caption("No documents loaded yet.")
     for d in docs:
         c1, c2 = st.columns([6, 1], vertical_alignment="center")
-        pages = f"{d.pages} page{'s' if d.pages != 1 else ''}"
-        c1.markdown(f"<div class='id-doc'>{esc(d.file_name)}<br><small>📄 {pages}</small></div>",
+        pages = f"📄 {d.pages} page{'s' if d.pages != 1 else ''}"
+        job = engine.jobs.get(d.doc_id)
+        if job and job.active:
+            pages = f"⏳ loading, page {job.done} of {job.total}"
+        c1.markdown(f"<div class='id-doc'>{esc(d.file_name)}<br><small>{pages}</small></div>",
                     unsafe_allow_html=True)
         if c2.button("✕", key=f"ask_rm_{d.doc_id}", help=f"Remove {d.file_name}"):
             ss.confirm_remove = d.doc_id
@@ -506,7 +578,7 @@ if typed and typed.files:
     st.rerun()
 
 question = ((typed.text if typed else "") or ss.pop("pending_question", "") or "").strip()
-if question and not docs:
+if question and not docs and not engine.jobs.active():
     st.warning("Please add a document first (use the + button).")
 elif question:
     ss.messages.append({"role": "user", "content": question})

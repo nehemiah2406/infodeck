@@ -32,6 +32,8 @@ class Settings:
     gemini_api_key: str = field(default="", repr=False)
     gemini_model: str = "gemini-3.8-flash"
     parser: str = "local"  # "local" (pdfplumber + local OCR) or "gemini" (page images read by Gemini)
+    ocr_workers: int = 6  # scanned pages OCR'd in parallel (worker processes); 1 = no extra processes
+    ocr_dpi: int = 200  # page image resolution for local OCR (150 lost accuracy in the evaluation)
     ollama_model: str = ""
     ollama_host: str = "http://localhost:11434"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -68,6 +70,8 @@ def get_settings() -> Settings:
         gemini_api_key=get("GEMINI_API_KEY", ""),
         gemini_model=get("GEMINI_MODEL", "gemini-3.8-flash"),
         parser=get("PARSER", "local").lower(),
+        ocr_workers=max(1, int(get("OCR_WORKERS", "6"))),
+        ocr_dpi=int(get("OCR_DPI", "200")),
         ollama_model=get("OLLAMA_MODEL", ""),
         ollama_host=get("OLLAMA_HOST", "http://localhost:11434"),
         embedding_model=get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),

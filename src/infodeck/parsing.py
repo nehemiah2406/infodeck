@@ -44,7 +44,7 @@ def parse_document(path: Path, name: str, doc_id: str, settings: Settings,
         raise ParseError(f"Unknown PARSER '{settings.parser}' in .env (use local or gemini).")
     parser = parser_name(settings, path)
     out = settings.parsed_dir / doc_id
-    meta = _read_meta(out)
+    meta = read_meta(out)
     if meta.get("parser") != parser:  # parsed before with another parser/model: start again
         shutil.rmtree(out, ignore_errors=True)
         meta = {}
@@ -53,24 +53,30 @@ def parse_document(path: Path, name: str, doc_id: str, settings: Settings,
         return _load_cached(out, name, meta)
     out.mkdir(parents=True, exist_ok=True)
     if parser == "local":
-        doc = load_document(path, name, progress)
+        doc = load_document(path, name, progress, settings.ocr_dpi, settings.ocr_workers)
         for p in doc.pages:
             (out / f"page_{p.number}.md").write_text(p.text, encoding="utf-8")
     else:
         doc = _parse_with_gemini(path, name, out, settings, progress, gemini_client)
-    _write_meta(out, {"file_name": name, "parser": parser, "complete": True, "page_count": doc.page_count,
+    write_meta(out, {"file_name": name, "parser": parser, "complete": True, "page_count": doc.page_count,
                       "pages": [p.number for p in doc.pages], "warnings": doc.warnings})
     return doc
 
 
-def _read_meta(folder: Path) -> dict:
+def read_meta(folder: Path) -> dict:
     try:
         return json.loads((folder / META_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
-def _write_meta(folder: Path, meta: dict) -> None:
+def is_partial(settings: Settings, doc_id: str) -> bool:
+    """True if reading this document started but did not finish (e.g. the app was closed)."""
+    meta = read_meta(settings.parsed_dir / doc_id)
+    return bool(meta) and not meta.get("complete")
+
+
+def write_meta(folder: Path, meta: dict) -> None:
     (folder / META_FILE).write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -139,7 +145,7 @@ def _parse_with_gemini(path: Path, name: str, out: Path, settings: Settings,
     def page_label(n: int) -> int:  # images have no page numbers (page 0)
         return 0 if is_image else n
 
-    _write_meta(out, {"file_name": name, "parser": parser_name(settings, path), "complete": False,
+    write_meta(out, {"file_name": name, "parser": parser_name(settings, path), "complete": False,
                       "page_count": total})
     texts: dict[int, str] = {}
     note = {"text": ""}

@@ -103,13 +103,14 @@ class VectorStore:
             self._facts.delete(where={"doc_id": doc_id})
 
     # ---- facts (exact values, Q&A) ----------------------------------------- #
-    def add_facts(self, doc_id: str, facts: list[Fact]) -> int:
+    def add_facts(self, doc_id: str, facts: list[Fact], start: int = 0) -> int:
+        """Add facts; `start` numbers them after facts added earlier for the same document."""
         if not facts:
             return 0
         vectors = self.embedder.embed_documents([f.embed_text for f in facts])
         with self._lock:
             self._facts.add(
-                ids=[f"{doc_id}-f{i}" for i in range(len(facts))],
+                ids=[f"{doc_id}-f{start + i}" for i in range(len(facts))],
                 embeddings=vectors,
                 documents=[f.embed_text for f in facts],
                 metadatas=[{**f.to_metadata(), "doc_id": doc_id} for f in facts],

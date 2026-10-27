@@ -154,22 +154,31 @@ def _split_block(block: _Block, size: int, overlap: int) -> list[str]:
     return parts
 
 
-def chunk_pages(pages: list[Page], file_name: str, size: int = 800, overlap: int = 150) -> list[Chunk]:
-    if overlap >= size:
-        raise ValueError("overlap must be smaller than chunk size")
-    chunks: list[Chunk] = []
-    section, open_title = "", ""
+class Chunker:
+    """Chunks pages one at a time (in page order), remembering the section and any
+    numbered item that continues onto the next page. Used while a big PDF is still loading."""
 
-    def emit(text: str, chunk_section: str, page: int) -> None:
-        chunks.append(Chunk(text, file_name, page, chunk_section, len(chunks)))
+    def __init__(self, file_name: str, size: int = 800, overlap: int = 150):
+        if overlap >= size:
+            raise ValueError("overlap must be smaller than chunk size")
+        self.file_name, self.size, self.overlap = file_name, size, overlap
+        self.section, self.open_title = "", ""
+        self.count = 0  # chunks made so far (chunk index within the document)
 
-    for page in pages:
+    def add_page(self, page: Page) -> list[Chunk]:
+        chunks: list[Chunk] = []
+
+        def emit(text: str, chunk_section: str) -> None:
+            chunks.append(Chunk(text, self.file_name, page.number, chunk_section, self.count))
+            self.count += 1
+
         lines = [re.sub(r"[ \t]+", " ", line).strip() for line in page.text.splitlines()]
-        blocks, section = _blocks([line for line in lines if line], section, open_title)
+        blocks, self.section = _blocks([line for line in lines if line], self.section, self.open_title)
         if blocks:
             last = blocks[-1]
-            open_title = last.title.removesuffix(" (continued)") if last.kind == "item" else ""
+            self.open_title = last.title.removesuffix(" (continued)") if last.kind == "item" else ""
 
+        size = self.size
         current, current_section = "", ""
         for block in blocks:
             text = "\n".join(block.lines)
@@ -177,14 +186,19 @@ def chunk_pages(pages: list[Page], file_name: str, size: int = 800, overlap: int
                 current += "\n" + text
             elif len(text) <= size:
                 if current:
-                    emit(current, current_section, page.number)
+                    emit(current, current_section)
                 current, current_section = text, block.section
             else:
                 if current:
-                    emit(current, current_section, page.number)
+                    emit(current, current_section)
                 current = ""
-                for part in _split_block(block, size, overlap):
-                    emit(part, block.section, page.number)
+                for part in _split_block(block, size, self.overlap):
+                    emit(part, block.section)
         if current:
-            emit(current, current_section, page.number)
-    return chunks
+            emit(current, current_section)
+        return chunks
+
+
+def chunk_pages(pages: list[Page], file_name: str, size: int = 800, overlap: int = 150) -> list[Chunk]:
+    chunker = Chunker(file_name, size, overlap)
+    return [chunk for page in pages for chunk in chunker.add_page(page)]

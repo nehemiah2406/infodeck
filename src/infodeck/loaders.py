@@ -3,8 +3,9 @@
 Supported: .pdf (page by page, tables kept as readable rows), .docx, .txt,
 images (.png/.jpg), Excel (.xlsx/.csv) and PowerPoint (.pptx).
 - Scanned PDF pages (a full-page image, or almost no text) are read with local
-  OCR (rapidocr). A scanned page's own text layer is ignored, because the OCR
-  that made it is often poor ("I I I" instead of 111).
+  OCR (rapidocr, see ocr.py), several pages in parallel. A scanned page's own
+  text layer is ignored, because the OCR that made it is often poor ("I I I"
+  instead of 111).
 - Excel: one sheet = one page, each row as "Header: value; Header: value".
 - PowerPoint: one slide = one page.
 Word, text, CSV and image files have no real pages, so they are returned as
@@ -17,12 +18,13 @@ import csv
 import io
 import logging
 import re
-import threading
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+
+from .ocr import get_pool, ocr_image
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +32,8 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".xlsx", ".csv", ".pptx"} | IMAGE_EXTENSIONS
 MIN_CHARS_PER_PAGE = 20  # fewer characters than this = "no text" (probably a scanned image)
 SCANNED_IMAGE_COVERAGE = 0.8  # a page mostly covered by one image is treated as a scan
-OCR_DPI = 200
+OCR_DPI = 200  # default page image resolution for OCR (setting OCR_DPI)
+HEADER_SAMPLE_PAGES = 6  # while streaming, headers/footers are found from the first pages (one wave of OCR workers)
 
 # progress(done, total, note): called after each page is read
 Progress = Callable[[int, int, str], None]
@@ -58,12 +61,13 @@ class UnsupportedFileError(ValueError):
     pass
 
 
-def load_document(path: Path, display_name: str | None = None, progress: Progress | None = None) -> LoadedDocument:
+def load_document(path: Path, display_name: str | None = None, progress: Progress | None = None,
+                  ocr_dpi: int = OCR_DPI, ocr_workers: int = 1) -> LoadedDocument:
     path = Path(path)
     name = display_name or path.name
     ext = path.suffix.lower()
     if ext == ".pdf":
-        return _load_pdf(path, name, progress)
+        return _load_pdf(path, name, progress, ocr_dpi, ocr_workers)
     if ext == ".docx":
         return _load_docx(path, name)
     if ext == ".txt":
@@ -78,56 +82,6 @@ def load_document(path: Path, display_name: str | None = None, progress: Progres
         return _load_pptx(path, name)
     raise UnsupportedFileError(
         f"{name}: file type '{ext}' is not supported (use PDF, Word, Excel, PowerPoint, text or image files).")
-
-
-# --------------------------------------------------------------------------- #
-# OCR (rapidocr + onnxruntime, runs on this computer)
-# --------------------------------------------------------------------------- #
-_ocr_engine = None
-_ocr_lock = threading.Lock()
-
-
-def ocr_image(image) -> str:
-    """Read the text in a PIL image, one output line per printed line."""
-    global _ocr_engine
-    import numpy as np
-
-    with _ocr_lock:  # the OCR engine is not thread-safe; also loads its models only once
-        if _ocr_engine is None:
-            from rapidocr import RapidOCR
-
-            logging.getLogger("RapidOCR").setLevel(logging.WARNING)
-            _ocr_engine = RapidOCR()
-        result = _ocr_engine(np.array(image.convert("RGB")))
-    if result.txts is None or result.boxes is None:
-        return ""
-    return _join_ocr_lines(
-        [(min(p[1] for p in box), max(p[1] for p in box), min(p[0] for p in box), max(p[0] for p in box), text)
-         for box, text in zip(result.boxes, result.txts) if text.strip()]
-    )
-
-
-def _join_ocr_lines(boxes: list[tuple[float, float, float, float, str]]) -> str:
-    """Group OCR boxes (top, bottom, left, right, text) into lines, left to right."""
-    lines: list[list[tuple]] = []
-    for box in sorted(boxes, key=lambda b: (b[0] + b[1]) / 2):
-        middle, height = (box[0] + box[1]) / 2, box[1] - box[0]
-        if lines:
-            last = lines[-1]
-            last_middle = sum((b[0] + b[1]) / 2 for b in last) / len(last)
-            if abs(middle - last_middle) < 0.5 * max(height, 1):
-                last.append(box)
-                continue
-        lines.append([box])
-    out = []
-    for line in lines:
-        line.sort(key=lambda b: b[2])
-        text = line[0][4]
-        for prev, box in zip(line, line[1:]):
-            gap = box[2] - prev[3]
-            text += ("   " if gap > 2 * (box[1] - box[0]) else " ") + box[4]
-        out.append(text.strip())
-    return "\n".join(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -180,70 +134,152 @@ def is_scanned_page(page) -> bool:
     return False
 
 
-def _strip_repeated_lines(pages: list[Page]) -> None:
-    """Remove header/footer lines that repeat on most pages (e.g. 'Company | Policy', 'Page 3')."""
+def _norm_line(line: str) -> str:
+    return re.sub(r"\d+", "#", line.strip().lower())
+
+
+def repeated_lines(pages: list[Page]) -> set[str]:
+    """Header/footer lines that repeat on most pages (e.g. 'Company | Policy', 'Page 3'), normalised."""
     if len(pages) < 3:
-        return
-
-    def norm(line: str) -> str:
-        return re.sub(r"\d+", "#", line.strip().lower())
-
+        return set()
     counts = Counter()
     for p in pages:
-        counts.update({norm(l) for l in p.text.splitlines() if l.strip()})
-    repeated = {line for line, n in counts.items() if n >= max(3, 0.6 * len(pages))}
+        counts.update({_norm_line(l) for l in p.text.splitlines() if l.strip()})
+    return {line for line, n in counts.items() if n >= max(3, 0.6 * len(pages))}
+
+
+def strip_lines(text: str, repeated: set[str]) -> str:
+    return "\n".join(l for l in text.splitlines() if _norm_line(l) not in repeated) if repeated else text
+
+
+def _strip_repeated_lines(pages: list[Page]) -> None:
+    repeated = repeated_lines(pages)
     for p in pages:
-        p.text = "\n".join(l for l in p.text.splitlines() if norm(l) not in repeated)
+        p.text = strip_lines(p.text, repeated)
 
 
-def _load_pdf(path: Path, name: str, progress: Progress | None = None) -> LoadedDocument:
+@dataclass
+class PdfPage:
+    number: int
+    total: int
+    text: str
+    ocr: bool  # True if the text was read with OCR
+
+
+def iter_pdf_pages(path: Path, name: str, ocr_dpi: int = OCR_DPI, ocr_workers: int = 1,
+                   known: dict[int, str] | None = None) -> Iterator[PdfPage]:
+    """Yield the pages of a PDF in page order.
+
+    Pages with a text layer are read directly. Scanned pages (or pages with almost no
+    text) are rendered at ocr_dpi and OCR'd by a pool of ocr_workers processes, so
+    several pages are read at once. `known` maps page numbers to text that was already
+    read before (the parse cache); those pages are not read again.
+    """
     import pdfplumber
 
+    pool = get_pool(ocr_workers)
+    known = known or {}
+    window = 2 * pool.workers  # pages waiting for OCR at most (keeps memory bounded for big PDFs)
+    try:
+        pdf = pdfplumber.open(path)
+    except Exception as exc:
+        raise ValueError(f"{name}: could not be opened as a PDF (is it damaged or password-protected?)") from exc
+    with pdf:
+        total = len(pdf.pages)
+        ready: dict[int, PdfPage] = {}
+        pending: dict[int, tuple] = {}  # number -> (text layer, scanned?, image, future)
+
+        def resolve(n: int) -> PdfPage:
+            if n in ready:
+                return ready.pop(n)
+            text, scanned, image, future = pending.pop(n)
+            try:
+                ocr_text = future.result()
+            except Exception:  # a worker process crashed: start a new pool, read this page here
+                log.warning("OCR worker failed on %s page %d; reading it in the main process", name, n)
+                pool.reset()
+                ocr_text = ocr_image(image)
+            if len(ocr_text.strip()) >= MIN_CHARS_PER_PAGE or scanned:
+                return PdfPage(n, total, ocr_text, True)
+            return PdfPage(n, total, text, False)
+
+        next_page = 1
+        try:
+            for n in range(1, total + 1):
+                if n in known:
+                    ready[n] = PdfPage(n, total, known[n], False)
+                else:
+                    page = pdf.pages[n - 1]
+                    try:
+                        text = _pdf_page_text(page)
+                    except Exception:  # fall back to plain text if table detection fails
+                        log.warning("Table extraction failed on %s page %d; using plain text", name, n)
+                        text = page.extract_text() or ""
+                    # Glyphs without a text mapping (usually bullet symbols) come out as "(cid:N)".
+                    text = re.sub(r"\(cid:\d+\)", "•", text)
+                    scanned = is_scanned_page(page)
+                    if scanned or len(text.strip()) < MIN_CHARS_PER_PAGE:
+                        image = page.to_image(resolution=ocr_dpi).original
+                        pending[n] = (text, scanned, image, pool.submit(image))
+                    else:
+                        ready[n] = PdfPage(n, total, text, False)
+                    page.close()  # free pdfplumber's cached objects (big PDFs)
+                # Hand out pages in order as soon as they are done; wait only if too many are queued.
+                while next_page <= n and (next_page in ready or len(pending) >= window
+                                          or pending[next_page][3].done()):
+                    yield resolve(next_page)
+                    next_page += 1
+            while next_page <= total:
+                yield resolve(next_page)
+                next_page += 1
+        finally:  # stopped early (e.g. the document was removed): drop pages still waiting for OCR
+            for item in pending.values():
+                item[3].cancel()
+
+
+def _load_pdf(path: Path, name: str, progress: Progress | None = None, ocr_dpi: int = OCR_DPI,
+              ocr_workers: int = 1) -> LoadedDocument:
     pages: list[Page] = []
     ocr_pages: list[int] = []
     try:
-        with pdfplumber.open(path) as pdf:
-            total = len(pdf.pages)
-            for i, page in enumerate(pdf.pages, start=1):
-                try:
-                    text = _pdf_page_text(page)
-                except Exception:  # fall back to plain text if table detection fails
-                    log.warning("Table extraction failed on %s page %d; using plain text", name, i)
-                    text = page.extract_text() or ""
-                # Glyphs without a text mapping (usually bullet symbols) come out as "(cid:N)".
-                text = re.sub(r"\(cid:\d+\)", "•", text)
-                if is_scanned_page(page) or len(text.strip()) < MIN_CHARS_PER_PAGE:
-                    ocr_text = ocr_image(page.to_image(resolution=OCR_DPI).original)
-                    if len(ocr_text.strip()) >= MIN_CHARS_PER_PAGE or is_scanned_page(page):
-                        text = ocr_text
-                        ocr_pages.append(i)
-                pages.append(Page(i, text))
-                if progress:
-                    progress(i, total, "")
+        for p in iter_pdf_pages(path, name, ocr_dpi, ocr_workers):
+            pages.append(Page(p.number, p.text))
+            if p.ocr:
+                ocr_pages.append(p.number)
+            if progress:
+                progress(p.number, p.total, "")
+    except ValueError:
+        raise
     except Exception as exc:
         raise ValueError(f"{name}: could not be opened as a PDF (is it damaged or password-protected?)") from exc
 
     _strip_repeated_lines(pages)
     doc = LoadedDocument(name, pages, page_count=len(pages))
+    doc.warnings = pdf_warnings(name, pages, ocr_pages)
+    doc.pages = [p for p in pages if len(p.text.strip()) >= MIN_CHARS_PER_PAGE]
+    return doc
+
+
+def pdf_warnings(name: str, pages: list[Page], ocr_pages: list[int]) -> list[str]:
+    warnings = []
     empty = [p.number for p in pages if len(p.text.strip()) < MIN_CHARS_PER_PAGE]
     if pages and len(empty) == len(pages):
-        doc.warnings.append(
+        warnings.append(
             f"{name} has no selectable text and OCR found none. It is probably a blank or "
             "unreadable scanned image, so it cannot be searched."
         )
     elif empty:
-        doc.warnings.append(
-            f"{name}: page(s) {', '.join(map(str, empty))} have no selectable text "
+        warnings.append(
+            f"{name}: page(s) {_ranges(empty)} have no selectable text "
             "(probably scanned images that OCR could not read) and were skipped."
         )
     read_by_ocr = [n for n in ocr_pages if n not in empty]
     if read_by_ocr:
-        doc.warnings.append(
+        warnings.append(
             f"{name}: page(s) {_ranges(read_by_ocr)} are scanned and were read with OCR. "
             "Check important values against the original."
         )
-    doc.pages = [p for p in pages if len(p.text.strip()) >= MIN_CHARS_PER_PAGE]
-    return doc
+    return warnings
 
 
 def _ranges(numbers: list[int]) -> str:

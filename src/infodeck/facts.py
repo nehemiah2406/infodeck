@@ -168,20 +168,31 @@ def _markdown_cells(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
-def extract_facts(pages: list[Page], file_name: str, doc_id: str = "") -> list[Fact]:
-    facts: list[Fact] = []
-    item_no, item_title = "", ""
-    table_header: list[str] = []
+class FactExtractor:
+    """Extracts facts page by page (in page order), remembering the current numbered item and
+    table header across pages. Used while a big PDF is still loading."""
 
-    def add(fact: Fact | None, line: str, page: Page, sub: str = "") -> None:
-        if fact is None or not (fact.name or fact.symbol or item_title):
-            return
-        fact.item = f"{item_no}.({sub})" if item_no and sub else (f"{item_no}." if item_no else "")
-        fact.item_title, fact.line = item_title, line.strip()
-        fact.file_name, fact.page, fact.doc_id = file_name, page.number, doc_id
-        facts.append(fact)
+    def __init__(self, file_name: str, doc_id: str = ""):
+        self.file_name, self.doc_id = file_name, doc_id
+        self.item_no, self.item_title = "", ""
+        self.table_header: list[str] = []
+        self.count = 0  # facts found so far in this document
 
-    for page in pages:
+    def add_page(self, page: Page) -> list[Fact]:
+        facts: list[Fact] = []
+
+        def add(fact: Fact | None, line: str, sub: str = "") -> None:
+            if fact is None or not (fact.name or fact.symbol or self.item_title):
+                return
+            if self.count >= MAX_FACTS_PER_DOCUMENT:
+                return
+            item_no = self.item_no
+            fact.item = f"{item_no}.({sub})" if item_no and sub else (f"{item_no}." if item_no else "")
+            fact.item_title, fact.line = self.item_title, line.strip()
+            fact.file_name, fact.page, fact.doc_id = self.file_name, page.number, self.doc_id
+            facts.append(fact)
+            self.count += 1
+
         lines = [line.strip() for line in page.text.splitlines()]
         i = 0
         while i < len(lines):
@@ -200,43 +211,48 @@ def extract_facts(pages: list[Page], file_name: str, doc_id: str = "") -> list[F
                     question = re.sub(r"^(?:Q\s*\d*\s*[.:)]|Question\s*\d*\s*[.:)])\s*", "", b, flags=re.I)
                     first = ANSWER_RE.sub("", bare(answer[0]), count=1)
                     text = "\n".join([first] + [bare(a) for a in answer[1:]]).strip()
-                    add(Fact("qa", question.strip(), text), line, page)
+                    add(Fact("qa", question.strip(), text), line)
                 continue
             # Markdown tables (Gemini output)
             if b.startswith("|") or line.startswith("|"):
                 cells = _markdown_cells(line)
                 if all(re.fullmatch(r":?-{3,}:?", c) for c in cells if c):
                     continue
-                if not table_header or (i >= 2 and not lines[i - 2].startswith("|")):
-                    table_header = cells
+                if not self.table_header or (i >= 2 and not lines[i - 2].startswith("|")):
+                    self.table_header = cells
                     continue
-                for f in _table_row_facts(list(zip(table_header, cells))):
-                    add(f, line, page)
+                for f in _table_row_facts(list(zip(self.table_header, cells))):
+                    add(f, line)
                 continue
-            table_header = []
+            self.table_header = []
             # Numbered item "9. Title": remember it; the title itself may hold a value
             m = re.match(r"^(\d{1,3})\.\s+(.+)$", b)
             if m and ITEM_RE.match(b):
-                item_no, item_title = m.group(1), m.group(2).strip()
-                add(parse_value_line(item_title) if "=" in item_title else None, line, page)
+                self.item_no, self.item_title = m.group(1), m.group(2).strip()
+                add(parse_value_line(self.item_title) if "=" in self.item_title else None, line)
                 continue
             if MD_HEADING_RE.match(line):
-                item_no, item_title = "", b
+                self.item_no, self.item_title = "", b
                 continue
             # Sub-item "(1) Push-up distance, 10.6 mm"
             m = SUBITEM_RE.match(b)
             if m:
                 sub = m.group(0).strip("() ")
-                add(parse_value_line(b[m.end():]), line, page, sub)
+                add(parse_value_line(b[m.end():]), line, sub)
                 continue
             # Local table rows "Header: value; Header: value"
             if ";" in b and b.count(":") >= 2:
                 pairs = [p.split(":", 1) for p in b.split(";") if ":" in p]
                 for f in _table_row_facts([(h.strip(), v.strip()) for h, v in pairs]):
-                    add(f, line, page)
+                    add(f, line)
                 continue
-            add(_variable_fact(b) or parse_value_line(b), line, page)
-    return facts[:MAX_FACTS_PER_DOCUMENT]
+            add(_variable_fact(b) or parse_value_line(b), line)
+        return facts
+
+
+def extract_facts(pages: list[Page], file_name: str, doc_id: str = "") -> list[Fact]:
+    extractor = FactExtractor(file_name, doc_id)
+    return [fact for page in pages for fact in extractor.add_page(page)]
 
 
 # --------------------------------------------------------------------------- #

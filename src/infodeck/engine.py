@@ -13,20 +13,23 @@ Answer flow for a question:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .chunking import chunk_pages
+from .chunking import Chunker, chunk_pages
 from .config import Settings
 from .embeddings import Reranker
-from .facts import Fact, extract_facts, format_fact_answer, question_covered, symbol_in_question
+from .facts import Fact, FactExtractor, extract_facts, format_fact_answer, question_covered, symbol_in_question
 from .gemini_parser import ParseError
+from .jobs import IngestJob, IngestQueue, JobCancelled
 from .llm import LLMError, LLMStatus
-from .loaders import SUPPORTED_EXTENSIONS, Progress, UnsupportedFileError
-from .parsing import parse_document
+from .loaders import (HEADER_SAMPLE_PAGES, MIN_CHARS_PER_PAGE, SUPPORTED_EXTENSIONS, Page, Progress,
+                      UnsupportedFileError, iter_pdf_pages, pdf_warnings, repeated_lines, strip_lines)
+from .parsing import is_partial, parse_document, read_meta, write_meta
 from .prompts import NOT_FOUND, SOURCES_MODE_NOTE, SYSTEM_PROMPT, build_user_prompt
 from .store import Passage, VectorStore, file_hash
 
@@ -34,6 +37,7 @@ log = logging.getLogger(__name__)
 
 SOURCES_MODE_MAX_PASSAGES = 3
 SAMPLES_MARKER = ".samples_loaded"
+COMMIT_EVERY_PAGES = 5  # while a big PDF loads, finished pages become searchable in batches of this size
 FACT_AMBIGUITY_MARGIN = 0.02  # two facts this close in score with different values: not an exact match
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 BRACKETS_RE = re.compile(r"\[[^\[\]]*\]")  # citations like [file.pdf, p.3]
@@ -41,12 +45,13 @@ BRACKETS_RE = re.compile(r"\[[^\[\]]*\]")  # citations like [file.pdf, p.3]
 
 @dataclass
 class IngestResult:
-    status: str  # "added" | "replaced" | "duplicate" | "no_text" | "error"
+    status: str  # "added" | "replaced" | "duplicate" | "queued" | "loading" | "no_text" | "cancelled" | "error"
     file_name: str
     message: str
     pages: int = 0
     chunks: int = 0
     warnings: list[str] = field(default_factory=list)
+    doc_id: str = ""
 
     @property
     def ok(self) -> bool:
@@ -61,6 +66,7 @@ class Answer:
     note: str = ""
     fact: Fact | None = None  # the matched fact ("exact" mode)
     unverified: list[str] = field(default_factory=list)  # numbers in the answer not found in the sources
+    loading: str = ""  # documents still being read when the question was asked
 
 
 def safe_file_name(name: str) -> str:
@@ -102,6 +108,7 @@ class InfoDeckEngine:
         self.settings = settings
         self.reranker = reranker
         self.gemini_client = gemini_client  # tests pass a fake; None = real client (PARSER=gemini)
+        self.jobs = IngestQueue(self._run_job)  # uploads are read in the background, one at a time
 
     # ------------------------------------------------------------------ #
     # Ingestion
@@ -114,7 +121,7 @@ class InfoDeckEngine:
             if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 raise UnsupportedFileError(f"{name}: file type '{path.suffix}' is not supported.")
             doc_id = file_hash(path)[:16]
-            if self.store.has_document(doc_id):
+            if self.is_loaded(doc_id):
                 return IngestResult("duplicate", name, f"{name} is already loaded (same content).")
             doc = parse_document(path, name, doc_id, self.settings, progress, self.gemini_client)
         except ParseError as e:
@@ -157,7 +164,7 @@ class InfoDeckEngine:
         tmp.write_bytes(data)
         try:
             doc_id = file_hash(tmp)[:16]
-            if self.store.has_document(doc_id):
+            if self.is_loaded(doc_id):
                 return IngestResult("duplicate", name, f"{name} is already loaded (same content).")
             final = upload_dir / f"{doc_id[:8]}_{name}"
             shutil.move(tmp, final)
@@ -168,17 +175,187 @@ class InfoDeckEngine:
         finally:
             tmp.unlink(missing_ok=True)
 
+    def queue_upload(self, file_name: str, data: bytes) -> IngestResult:
+        """Save an uploaded file and queue it to be read in the background (one file at a time).
+
+        The same content is never queued twice: a rerun, a browser refresh or a second upload
+        of a file that is still being read just reports that it is already being read.
+        """
+        name = safe_file_name(file_name)
+        if Path(name).suffix.lower() not in SUPPORTED_EXTENSIONS:
+            return IngestResult("error", name, f"{name}: only PDF, Word, Excel, PowerPoint, text and image "
+                                               "files are supported.")
+        upload_dir = self.settings.upload_dir
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        tmp = upload_dir / f".incoming_{os.getpid()}_{name}"
+        tmp.write_bytes(data)
+        try:
+            doc_id = file_hash(tmp)[:16]
+            job = self.jobs.get(doc_id)
+            if job and job.active:
+                return IngestResult("loading", name, f"{name} is already being read.", doc_id=doc_id)
+            if self.is_loaded(doc_id):
+                return IngestResult("duplicate", name, f"{name} is already loaded (same content).", doc_id=doc_id)
+            final = upload_dir / f"{doc_id[:8]}_{name}"
+            os.replace(tmp, final)
+            _, new = self.jobs.submit(doc_id, name, final)
+            if not new:
+                return IngestResult("loading", name, f"{name} is already being read.", doc_id=doc_id)
+            return IngestResult("queued", name, f"{name} is queued to be read.", doc_id=doc_id)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def is_loaded(self, doc_id: str) -> bool:
+        """True if the document is fully indexed.
+
+        Chunks left over from an upload that was interrupted (app closed while reading) are
+        removed, so the document is read again; pages read before come from the parse cache.
+        """
+        if not self.store.has_document(doc_id):
+            return False
+        job = self.jobs.get(doc_id)
+        if job and job.active:
+            return False
+        if is_partial(self.settings, doc_id):
+            log.info("Removing the half-indexed leftover of an interrupted upload (%s)", doc_id)
+            self.store.remove_document(doc_id)
+            return False
+        return True
+
+    def _run_job(self, job: IngestJob) -> IngestResult:
+        """Read one queued upload (runs in the background thread). Never raises."""
+        try:
+            if self.settings.parser == "local" and job.path.suffix.lower() == ".pdf":
+                result = self._ingest_pdf_streaming(job)
+            else:
+                result = self.ingest_file(job.path, job.file_name, progress=job.update)
+                job.check_cancelled()
+        except JobCancelled:
+            self.store.remove_document(job.doc_id)
+            result = IngestResult("cancelled", job.file_name, f"Stopped reading {job.file_name}.")
+        except (ParseError, UnsupportedFileError, ValueError) as e:
+            self.store.remove_document(job.doc_id)
+            result = IngestResult("error", job.file_name, str(e))
+        except Exception:
+            log.exception("Failed to read %s", job.file_name)
+            self.store.remove_document(job.doc_id)
+            result = IngestResult("error", job.file_name, f"{job.file_name} could not be read. Is the file damaged?")
+        if not result.ok:
+            self._delete_upload(job.path)
+        result.doc_id = job.doc_id
+        return result
+
+    def _ingest_pdf_streaming(self, job: IngestJob) -> IngestResult:
+        """Read a PDF page by page (scans OCR'd in parallel) and index finished pages in small
+        batches, so questions can be asked about the first pages while the rest is still read."""
+        s, name, path, doc_id = self.settings, job.file_name, job.path, job.doc_id
+        out = s.parsed_dir / doc_id
+        meta = read_meta(out)
+        if meta.get("parser") != "local":  # parsed before with another parser: start again
+            shutil.rmtree(out, ignore_errors=True)
+            meta = {}
+        if meta.get("complete"):  # read completely before: index it from the parse cache
+            return self.ingest_file(path, name, progress=job.update)
+        out.mkdir(parents=True, exist_ok=True)
+        known = {}  # pages read before the app was closed
+        for f in out.glob("page_*.md"):
+            known[int(f.stem.removeprefix("page_"))] = f.read_text(encoding="utf-8")
+
+        chunker = Chunker(name, s.chunk_size, s.chunk_overlap)
+        fact_extractor = FactExtractor(name, doc_id)
+        old_versions = [d for d in self.store.find_by_name(name) if d != doc_id]
+        all_pages: list[Page] = []
+        kept: list[Page] = []
+        ocr_pages: list[int] = []
+        sample: list[Page] = []  # first pages, used to find repeated headers/footers
+        batch: list[Page] = []
+        repeated: set[str] | None = None
+        total = 0
+
+        def commit(pages: list[Page]) -> None:
+            job.check_cancelled()
+            for p in pages:
+                (out / f"page_{p.number}.md").write_text(p.text, encoding="utf-8")
+            pages = [p for p in pages if len(p.text.strip()) >= MIN_CHARS_PER_PAGE]
+            if pages and old_versions and not kept:  # same name, new content: replace the old version
+                for old in old_versions:
+                    self.remove_document(old, delete_file=False)
+            chunks = [c for p in pages for c in chunker.add_page(p)]
+            facts = [f for p in pages for f in fact_extractor.add_page(p)]
+            self.store.add_document(doc_id, chunks, total, str(path))
+            self.store.add_facts(doc_id, facts, start=fact_extractor.count - len(facts))
+            kept.extend(pages)
+
+        for pdf_page in iter_pdf_pages(path, name, s.ocr_dpi, s.ocr_workers, known):
+            job.check_cancelled()
+            if not total:
+                total = pdf_page.total
+                write_meta(out, {"file_name": name, "parser": "local", "complete": False, "page_count": total})
+            if pdf_page.ocr:
+                ocr_pages.append(pdf_page.number)
+            page = Page(pdf_page.number, pdf_page.text)
+            all_pages.append(page)
+            if repeated is None:
+                sample.append(page)
+                if len(sample) >= min(HEADER_SAMPLE_PAGES, total):
+                    repeated = repeated_lines(sample)
+                    for p in sample:
+                        p.text = strip_lines(p.text, repeated)
+                    commit(sample)
+            else:
+                page.text = strip_lines(page.text, repeated)
+                batch.append(page)
+                if len(batch) >= COMMIT_EVERY_PAGES:
+                    commit(batch)
+                    batch = []
+            job.update(pdf_page.number, total)
+        commit(batch)
+        job.check_cancelled()
+
+        warnings = pdf_warnings(name, all_pages, ocr_pages)
+        write_meta(out, {"file_name": name, "parser": "local", "complete": True, "page_count": total,
+                         "pages": [p.number for p in kept], "warnings": warnings})
+        if not kept:
+            msg = warnings[0] if warnings else f"{name} contains no text."
+            return IngestResult("no_text", name, msg, pages=total, warnings=warnings)
+        verb = "Updated" if old_versions else "Added"
+        log.info("%s %s: %d pages, %d chunks, %d exact values", verb, name, total, chunker.count,
+                 fact_extractor.count)
+        return IngestResult("replaced" if old_versions else "added", name, f"{verb} {name} ({total} pages).",
+                            pages=total, chunks=chunker.count, warnings=warnings)
+
+    def loading_note(self) -> str:
+        """'X is still loading (page 57 of 204)...' while documents are being read, else ''."""
+        notes = []
+        for job in self.jobs.active():
+            if job.status == "running" and job.total:
+                notes.append(f"{job.file_name} is still loading (page {job.done} of {job.total})")
+            else:
+                notes.append(f"{job.file_name} is waiting to be read")
+        if not notes:
+            return ""
+        return "; ".join(notes) + ". Pages not read yet are not searched."
+
     def remove_document(self, doc_id: str, delete_file: bool = True) -> None:
+        job = self.jobs.cancel(doc_id)  # stops a document that is still being read
         docs = {d.doc_id: d for d in self.store.list_documents()}
         info = docs.get(doc_id)
         self.store.remove_document(doc_id)
-        if delete_file and info:
-            src = Path(info.source_path)
-            try:  # only delete files we saved ourselves (never the sample docs)
-                if src.resolve().is_relative_to(self.settings.upload_dir.resolve()):
-                    src.unlink(missing_ok=True)
-            except OSError:
-                log.warning("Could not delete uploaded file for %s", info.file_name)
+        if not delete_file:
+            return
+        if job and job.status == "running":
+            return  # the job has the file open; it deletes the file itself when it stops
+        if job:
+            self._delete_upload(job.path)
+        elif info:
+            self._delete_upload(Path(info.source_path))
+
+    def _delete_upload(self, src: Path) -> None:
+        try:  # only delete files we saved ourselves (never the sample docs)
+            if src.resolve().is_relative_to(self.settings.upload_dir.resolve()):
+                src.unlink(missing_ok=True)
+        except OSError:
+            log.warning("Could not delete uploaded file %s", src.name)
 
     def load_samples_once(self) -> list[IngestResult]:
         """Load the sample PDFs on the very first start (not again if the user removes them)."""
@@ -258,6 +435,12 @@ class InfoDeckEngine:
         question = question.strip()
         if not question:
             return Answer("Please type a question.", "error")
+        loading = self.loading_note()
+        ans = self._answer(question, status)
+        ans.loading = loading
+        return ans
+
+    def _answer(self, question: str, status: LLMStatus) -> Answer:
         exact = self.exact_answer(question)
         if exact:
             return exact
