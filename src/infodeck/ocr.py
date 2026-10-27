@@ -47,17 +47,51 @@ def ocr_image(image) -> str:
     return _result_text(result)
 
 
-def _result_text(result) -> str:
+def _result_boxes(result) -> list[tuple[float, float, float, float, str]]:
     if result.txts is None or result.boxes is None:
-        return ""
-    return join_ocr_lines(
-        [(min(p[1] for p in box), max(p[1] for p in box), min(p[0] for p in box), max(p[0] for p in box), text)
-         for box, text in zip(result.boxes, result.txts) if text.strip()]
-    )
+        return []
+    return [(min(p[1] for p in box), max(p[1] for p in box), min(p[0] for p in box), max(p[0] for p in box), text)
+            for box, text in zip(result.boxes, result.txts) if text.strip()]
+
+
+def _result_text(result) -> str:
+    return join_ocr_lines(_result_boxes(result))
+
+
+def ocr_line_boxes(image) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """OCR a PIL image (in this process) into (line text, (left, top, right, bottom)) in pixels.
+
+    Used for page previews; the lines are grouped exactly like the text read at upload.
+    """
+    global _engine
+    import numpy as np
+
+    with _engine_lock:
+        if _engine is None:
+            _engine = _load_engine()
+        result = _engine(np.array(image.convert("RGB")))
+    out = []
+    for line in group_ocr_lines(_result_boxes(result)):
+        box = (min(b[2] for b in line), min(b[0] for b in line), max(b[3] for b in line), max(b[1] for b in line))
+        out.append((_line_text(line), box))
+    return out
 
 
 def join_ocr_lines(boxes: list[tuple[float, float, float, float, str]]) -> str:
     """Group OCR boxes (top, bottom, left, right, text) into lines, left to right."""
+    return "\n".join(_line_text(line) for line in group_ocr_lines(boxes))
+
+
+def _line_text(line: list[tuple]) -> str:
+    text = line[0][4]
+    for prev, box in zip(line, line[1:]):
+        gap = box[2] - prev[3]
+        text += ("   " if gap > 2 * (box[1] - box[0]) else " ") + box[4]
+    return text.strip()
+
+
+def group_ocr_lines(boxes: list[tuple[float, float, float, float, str]]) -> list[list[tuple]]:
+    """OCR boxes grouped into lines (top to bottom), each line sorted left to right."""
     lines: list[list[tuple]] = []
     for box in sorted(boxes, key=lambda b: (b[0] + b[1]) / 2):
         middle, height = (box[0] + box[1]) / 2, box[1] - box[0]
@@ -68,15 +102,9 @@ def join_ocr_lines(boxes: list[tuple[float, float, float, float, str]]) -> str:
                 last.append(box)
                 continue
         lines.append([box])
-    out = []
     for line in lines:
         line.sort(key=lambda b: b[2])
-        text = line[0][4]
-        for prev, box in zip(line, line[1:]):
-            gap = box[2] - prev[3]
-            text += ("   " if gap > 2 * (box[1] - box[0]) else " ") + box[4]
-        out.append(text.strip())
-    return "\n".join(out)
+    return lines
 
 
 # --------------------------------------------------------------------------- #

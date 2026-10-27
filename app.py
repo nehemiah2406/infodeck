@@ -5,9 +5,7 @@ Run with run.bat, or:  .venv\\Scripts\\python -m streamlit run app.py
 
 from __future__ import annotations
 
-import html
 import logging
-import re
 import sys
 import time
 from pathlib import Path
@@ -21,8 +19,13 @@ from infodeck.config import get_settings, setup_logging  # noqa: E402
 from infodeck.embeddings import CrossEncoderReranker, SentenceTransformerEmbedder  # noqa: E402
 from infodeck.engine import Answer, InfoDeckEngine  # noqa: E402
 from infodeck.llm import LLMError, resolve_llm  # noqa: E402
+from infodeck.preview import can_preview, page_preview  # noqa: E402
 from infodeck.prompts import NOT_FOUND, SOURCES_MODE_NOTE  # noqa: E402
 from infodeck.store import Passage, VectorStore  # noqa: E402
+from infodeck.ui import (AI_MODES, Trace, card_head_html, cited_html, confidence, copy_button_html,  # noqa: E402
+                         copy_label, copy_text, esc, exact_html, follow_ups, has_numbers, is_quota,
+                         not_found_html, preview_skeleton_html, skeleton_html, snippet, source_cards_html,
+                         source_line_html, tag_html, topbar_html, trail_html, trail_steps, unique_sources)
 
 log = logging.getLogger("infodeck.app")
 
@@ -36,220 +39,13 @@ SAMPLE_QUESTIONS = [
     "What is the hotel limit per night in Mumbai?",
     "What should I do if I lose my laptop?",
 ]
-# Citations written by the LLM, e.g. [KRT_Leave_Policy.pdf, p.2] or [a.pdf, p.1; b.pdf, p.3]
-CITATION_RE = re.compile(r"\[([^\[\]]+?\.(?:pdf|docx|txt|xlsx|csv|pptx|png|jpe?g)\b[^\[\]]*)\]", re.IGNORECASE)
 
 st.set_page_config(page_title=APP_NAME, page_icon="📘", layout="centered",
                    initial_sidebar_state="expanded", menu_items={})
+st.markdown(f"<style>{(Path(__file__).parent / 'app.css').read_text(encoding='utf-8')}</style>",
+            unsafe_allow_html=True)
 
-st.markdown(
-    """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
-
-:root {
-    --ink: #050507;
-    --glass: rgba(255, 255, 255, 0.035);
-    --glass-strong: rgba(255, 255, 255, 0.06);
-    --line: rgba(255, 255, 255, 0.09);
-    --line-strong: rgba(255, 255, 255, 0.18);
-    --text: #ededef;
-    --muted: #8e8e98;
-    --orange: #ff7a45;
-    --red: #e2455a;
-    --violet: #8b6cff;
-    --blue: #5b7cfa;
-}
-
-/* ---------- Hide Streamlit chrome ---------- */
-/* Only the toolbar's actions are hidden: the toolbar itself holds the "expand sidebar" button. */
-#MainMenu, footer, [data-testid="stToolbarActions"], [data-testid="stAppDeployButton"], .stDeployButton,
-[data-testid="stDecoration"], [data-testid="stStatusWidget"], [data-testid="stMainMenu"] {
-    display: none !important;
-}
-header[data-testid="stHeader"], [data-testid="stToolbar"] { background: transparent !important; }
-/* Keep the sidebar open/close buttons visible (test ids from Streamlit 1.66) */
-[data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapseButton"] {
-    display: flex !important; visibility: visible !important;
-}
-/* Don't grey out the page while it updates */
-[data-stale="true"] { opacity: 1 !important; }
-
-/* ---------- Base + "new era" particle ring ---------- */
-html, body, .stApp, .stMarkdown, button, input, textarea, [data-testid="stWidgetLabel"] {
-    font-family: 'Inter', system-ui, sans-serif !important;
-}
-.stApp { background: var(--ink); color: var(--text); }
-/* Ring of fine light strands: a conic colour wheel masked to a thin, streaky ring */
-.stApp::before {
-    content: ""; position: fixed; left: 50%; top: 38%; z-index: 0; pointer-events: none;
-    width: min(1150px, 150vw); aspect-ratio: 1; translate: -50% -50%;
-    background: conic-gradient(from 210deg, var(--orange), var(--red), var(--violet), var(--blue),
-                               var(--violet), var(--red), var(--orange));
-    -webkit-mask: radial-gradient(closest-side, transparent 56%, #000 63%, #000 70%, transparent 82%),
-                  repeating-conic-gradient(#000 0deg .3deg, transparent .3deg 1.05deg);
-    -webkit-mask-composite: source-in;
-    mask: radial-gradient(closest-side, transparent 56%, #000 63%, #000 70%, transparent 82%),
-          repeating-conic-gradient(#000 0deg .3deg, transparent .3deg 1.05deg);
-    mask-composite: intersect;
-    opacity: .5; filter: blur(.4px);
-    animation: drift 140s linear infinite;
-}
-/* Soft glow behind the strands, plus darkness in the middle so text stays readable */
-.stApp::after {
-    content: ""; position: fixed; left: 50%; top: 38%; z-index: 0; pointer-events: none;
-    width: min(1150px, 150vw); aspect-ratio: 1; translate: -50% -50%;
-    background:
-        radial-gradient(closest-side, var(--ink) 48%, transparent 70%),
-        conic-gradient(from 210deg, rgba(255, 122, 69, .35), rgba(226, 69, 90, .3), rgba(139, 108, 255, .3),
-                       rgba(91, 124, 250, .35), rgba(139, 108, 255, .3), rgba(226, 69, 90, .3), rgba(255, 122, 69, .35));
-    border-radius: 50%; filter: blur(60px); opacity: .55;
-    animation: breathe 12s ease-in-out infinite alternate;
-}
-@keyframes drift   { to { rotate: 360deg; } }
-@keyframes breathe { from { scale: .96; opacity: .45; } to { scale: 1.04; opacity: .6; } }
-[data-testid="stAppViewContainer"], [data-testid="stMain"], [data-testid="stBottom"],
-[data-testid="stBottom"] > div, [data-testid="stBottomBlockContainer"] {
-    background: transparent !important;
-}
-[data-testid="stAppViewContainer"] { position: relative; z-index: 1; }
-.block-container { padding-top: 3rem; max-width: 820px; }
-
-/* ---------- Hero ---------- */
-.id-hero { text-align: center; margin: 3.2rem 0 2.2rem 0; }
-.id-hero.compact { margin: .4rem 0 1.4rem 0; }
-.id-badge {
-    display: inline-flex; align-items: center; gap: .5rem; font-size: .8rem; color: #d4d4d8;
-    padding: .34rem .85rem; border-radius: 999px; background: rgba(255, 255, 255, .04);
-    border: 1px solid var(--line-strong); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-}
-.id-badge .glyph { width: .55rem; height: .55rem; border-radius: 2px; rotate: 45deg;
-    background: linear-gradient(135deg, var(--orange), var(--blue)); }
-.id-headline {
-    font-weight: 300; font-size: clamp(2.2rem, 5.4vw, 3.6rem); line-height: 1.08; letter-spacing: -0.035em;
-    margin: 1.2rem 0 0 0;
-    background: linear-gradient(180deg, #ffffff 30%, #a1a1aa 100%);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-}
-.id-hero.compact .id-headline { font-size: 1.7rem; margin-top: .8rem; }
-.id-tagline { color: var(--muted); font-size: 1.02rem; line-height: 1.6; margin: 1rem auto 0 auto; max-width: 520px; }
-.id-hero.compact .id-tagline { display: none; }
-
-/* ---------- Sidebar (dark glass) ---------- */
-[data-testid="stSidebar"] {
-    background: rgba(8, 8, 11, 0.78) !important;
-    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    border-right: 1px solid var(--line);
-}
-.id-brand { display: flex; align-items: center; gap: .6rem; font-size: 1.35rem; font-weight: 600;
-    letter-spacing: -0.02em; color: #fafafa; margin-bottom: .3rem; }
-.id-brand .glyph { width: .8rem; height: .8rem; border-radius: 3px; rotate: 45deg;
-    background: linear-gradient(135deg, var(--orange), var(--blue)); box-shadow: 0 0 16px rgba(255, 122, 69, .45); }
-[data-testid="stSidebar"] h3 { font-size: .74rem; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
-[data-testid="stFileUploaderDropzone"] {
-    background: var(--glass) !important; border: 1px dashed var(--line-strong) !important; border-radius: 16px;
-}
-[data-testid="stFileUploaderDropzone"]:hover { border-color: rgba(255, 122, 69, .55) !important; }
-.id-doc { font-size: .88rem; line-height: 1.3; color: var(--text); overflow-wrap: anywhere; }
-[data-testid="stSidebar"] [class*="st-key-ask_rm_"] button {
-    padding: .1rem .5rem !important; min-height: 2rem; color: var(--muted) !important;
-}
-[data-testid="stSidebar"] [class*="st-key-ask_rm_"] button:hover { color: #fca5a5 !important; border-color: rgba(248, 113, 113, .6) !important; }
-.id-doc small { color: var(--muted); }
-
-/* AI-mode pill */
-.id-pill {
-    display: inline-flex; align-items: center; gap: .45rem; font-size: .78rem; font-weight: 500;
-    padding: .3rem .75rem; border-radius: 999px; margin: .4rem 0 .2rem 0;
-}
-.id-pill .dot { width: .45rem; height: .45rem; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
-.id-pill.on  { background: rgba(91, 124, 250, 0.12); border: 1px solid rgba(91, 124, 250, 0.42); color: #b4c3ff; }
-.id-pill.off { background: rgba(255, 122, 69, 0.10); border: 1px solid rgba(255, 122, 69, 0.42); color: #ffb08f; }
-.id-pill-reason { font-size: .78rem; color: var(--muted); margin-bottom: .8rem; }
-.id-pill.exact { background: rgba(52, 211, 153, 0.10); border: 1px solid rgba(52, 211, 153, 0.42); color: #a7f3d0; margin-top: 0; }
-.id-exact-value { font-size: 1.6rem; font-weight: 500; letter-spacing: -0.01em; color: #fafafa; margin: .5rem 0 .2rem 0; }
-.id-exact-meta { font-size: .88rem; color: var(--muted); line-height: 1.7; }
-.id-exact-meta code { color: #e4e4e7; background: rgba(255, 255, 255, .05); }
-
-/* ---------- Buttons: outlined pills ---------- */
-.stButton > button, [data-testid="stPopover"] button {
-    background: rgba(255, 255, 255, .03) !important; color: var(--text) !important;
-    border: 1px solid var(--line-strong) !important; border-radius: 999px !important;
-    transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease;
-}
-.stButton > button:hover {
-    border-color: rgba(255, 255, 255, .42) !important; box-shadow: 0 0 22px rgba(255, 122, 69, .16);
-}
-.stButton > button[kind="primary"] {
-    background: #f4f4f5 !important; border: 1px solid #f4f4f5 !important; color: #09090b !important; font-weight: 500;
-}
-.stButton > button[kind="primary"]:hover { background: #ffffff !important; }
-/* Example questions */
-.st-key-samples { justify-content: center; }
-.st-key-samples .stButton > button { padding: .5rem .7rem .5rem 1.1rem !important; color: #e4e4e7 !important; }
-.st-key-samples .stButton > button p::after {
-    content: "↗"; display: inline-grid; place-items: center; width: 1.45rem; height: 1.45rem; margin-left: .6rem;
-    border-radius: 50%; border: 1px solid var(--line-strong); font-size: .75rem; color: #d4d4d8;
-}
-.st-key-samples .stButton > button:hover { transform: translateY(-1px); }
-.id-hint { color: var(--muted); font-size: .82rem; margin-bottom: .6rem; text-align: center; }
-
-/* ---------- Chat ---------- */
-[data-testid="stChatMessage"] {
-    background: rgba(12, 12, 16, .55); border: 1px solid var(--line); border-radius: 20px;
-    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-    padding: 1rem 1.15rem; margin-bottom: .8rem;
-    animation: fadeUp .45s ease both;
-}
-[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
-    background: rgba(255, 122, 69, 0.06); border-color: rgba(255, 140, 100, 0.22);
-}
-@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-[data-testid="stChatMessage"] p, [data-testid="stChatMessage"] li { color: var(--text); line-height: 1.65; }
-[data-testid="stChatInput"], [data-testid="stChatInput"] > div {
-    background: rgba(12, 12, 16, 0.85) !important; border-radius: 22px !important;
-    border-color: var(--line-strong) !important;
-}
-[data-testid="stChatInput"]:focus-within > div { border-color: rgba(255, 122, 69, .55) !important; }
-[data-testid="stChatInput"] textarea { color: var(--text) !important; }
-
-/* Citation chips */
-.chip {
-    display: inline-block; font-size: .72rem; font-weight: 500; line-height: 1.5; white-space: nowrap;
-    padding: .05rem .55rem; margin: 0 .12rem; border-radius: 999px; vertical-align: 1px;
-    background: rgba(91, 124, 250, 0.13); border: 1px solid rgba(91, 124, 250, 0.38); color: #c7d2fe;
-}
-.chip.score { background: rgba(255, 122, 69, 0.10); border-color: rgba(255, 122, 69, 0.34); color: #ffc2a8; }
-
-/* Sources expander */
-[data-testid="stExpander"] details {
-    background: rgba(255, 255, 255, 0.025) !important; border: 1px solid var(--line) !important;
-    border-radius: 16px !important; backdrop-filter: blur(12px);
-}
-[data-testid="stExpander"] summary { color: var(--muted); font-size: .88rem; }
-.id-source { margin: .2rem 0 .3rem 0; font-size: .82rem; color: var(--muted); }
-.id-passage {
-    background: rgba(255, 255, 255, 0.025); border-left: 2px solid var(--orange);
-    padding: .6rem .8rem; border-radius: 8px; font-size: .88rem; line-height: 1.55;
-    color: #d4d4d8; margin: 0 0 .9rem 0;
-}
-.id-notice { color: #ffb08f; font-weight: 500; }
-
-/* Progress bar + spinner */
-[data-testid="stProgress"] div[role="progressbar"] > div > div {
-    background-image: linear-gradient(90deg, var(--orange), var(--red), var(--violet), var(--blue)) !important;
-}
-[data-testid="stSpinner"] { color: var(--muted); }
-[data-testid="stAlert"] { background: var(--glass) !important; border: 1px solid var(--line); border-radius: 14px; }
-
-@media (prefers-reduced-motion: reduce) {
-    .stApp::before, .stApp::after, [data-testid="stChatMessage"] { animation: none !important; }
-    .st-key-samples .stButton > button:hover { transform: none; }
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+deferred = []  # page previews to load after everything else on the page (they must not slow answers down)
 
 
 # --------------------------------------------------------------------------- #
@@ -267,82 +63,181 @@ def get_engine() -> InfoDeckEngine:
     return engine
 
 
-def esc(text: str) -> str:
-    """Escape document text for safe HTML display (no injected HTML/markdown/LaTeX)."""
-    return html.escape(text).replace("$", "&#36;").replace("\n", "<br>")
+@st.cache_resource(show_spinner=False)
+def ai_flags() -> dict:
+    """Shared by all users: was the last AI call stopped by a used-up quota?"""
+    return {"quota": False}
 
 
-def answer_html(text: str) -> str:
-    """LLM answer as markdown-safe HTML, with [file, p.N] citations turned into chips."""
-    safe = html.escape(text, quote=False).replace("$", "&#36;")
+def ai_pill(status) -> tuple[str, str, str]:
+    """(label, tone, tooltip) for the AI status pill in the top bar."""
+    if status.llm is None:
+        return "AI off", "warn", status.reason
+    if ai_flags()["quota"]:
+        return "Quota used up", "warn", "The last AI answer failed because the quota is used up."
+    return f"{AI_MODES.get(status.mode, status.label)} ready", "ok", status.label
 
-    def chips(m: re.Match) -> str:
-        return "".join(f"<span class='chip'>{p.strip()}</span>" for p in m.group(1).split(";") if p.strip())
 
-    return CITATION_RE.sub(chips, safe)
+def render_topbar(slot, engine: InfoDeckEngine) -> None:
+    docs_now = engine.store.list_documents()
+    pages = 0
+    for d in docs_now:
+        job = engine.jobs.get(d.doc_id)
+        pages += job.done if job and job.active else d.pages  # a document still loading: pages read so far
+    label, tone, tip = ai_pill(resolve_llm(get_settings()))
+    slot.markdown(topbar_html(APP_NAME, len(docs_now), pages, label, tone, tip), unsafe_allow_html=True)
 
 
+# --------------------------------------------------------------------------- #
+# Answer cards
+# --------------------------------------------------------------------------- #
 def render_passages(passages: list[Passage]) -> None:
     for p in passages:
-        section = f" &nbsp;{esc(p.section)}" if p.section else ""
-        st.markdown(
-            f"<div class='id-source'><span class='chip'>{esc(p.label)}</span>"
-            f"<span class='chip score'>relevance {p.score:.2f}</span>{section}</div>"
-            f"<div class='id-passage'>{esc(p.text)}</div>",
-            unsafe_allow_html=True,
-        )
+        section = f" · {esc(p.section)}" if p.section else ""
+        st.markdown(f"<div class='id-source'>{esc(p.label)}{section} · relevance {p.score:.2f}</div>"
+                    f"<div class='id-passage'>{esc(p.text)}</div>", unsafe_allow_html=True)
 
 
-def render_exact(ans: Answer) -> None:
-    """An answer taken straight from the exact-value / Q&A index (no AI involved)."""
-    f = ans.fact
-    st.markdown("<div class='id-pill exact'><span class='dot'></span>Exact value</div>", unsafe_allow_html=True)
-    if f.kind == "qa":
-        st.markdown(f"<div class='id-exact-meta'>{esc(f.name)}</div><div class='id-passage'>{esc(f.value)}</div>",
-                    unsafe_allow_html=True)
+def source_path(doc_id: str) -> str:
+    return next((d.source_path for d in docs if d.doc_id == doc_id), "")
+
+
+def preview_caption(file_name: str, page: int) -> str:
+    where = f" · p. {page}" if page else ""
+    return f"<div class='id-prevcap'><b>{esc(file_name)}</b>{where}</div>"
+
+
+def show_preview(slot, doc_id: str, page: int, target: str, file_name: str, cached_only: bool) -> bool:
+    """Fill the slot with the page crop. Returns False if it is not cached yet (cached_only)."""
+    key = (doc_id, page, target)
+    pv = None
+    if key not in ss.preview_failed:
+        try:
+            pv = page_preview(source_path(doc_id), page, target, get_settings().parsed_dir / doc_id, cached_only)
+        except Exception:
+            log.warning("Page preview failed for %s p.%s", file_name, page, exc_info=True)
+            ss.preview_failed.add(key)
+        if pv is None and cached_only and key not in ss.preview_failed:
+            return False
+    with slot.container():
+        if pv:
+            st.image(pv.crop, width="stretch")
+        st.markdown(preview_caption(file_name, page), unsafe_allow_html=True)
+    return True
+
+
+@st.dialog("Source page", width="large")
+def open_page(doc_id: str, page: int, target: str, file_name: str) -> None:
+    try:
+        pv = page_preview(source_path(doc_id), page, target, get_settings().parsed_dir / doc_id)
+    except Exception:
+        log.warning("Page preview failed for %s p.%s", file_name, page, exc_info=True)
+        pv = None
+    if pv:
+        st.image(pv.full, width="stretch")
+        st.caption(f"{file_name}" + (f", page {page}" if page else "") +
+                   (" · the matched line is boxed in green" if pv.boxed else ""))
     else:
-        what = f.name or f.item_title
-        rows = [f"<b>{esc(what)}</b>" + (f" ({esc(f.symbol)})" if f.symbol else "")]
-        if f.formula:
-            rows.append(f"Formula: <code>{esc(f.formula)}</code>")
-        if f.item:
-            rows.append(f"Item {esc(f.item)}" + (f" {esc(f.item_title)}" if f.item_title and f.item_title != what else ""))
-        st.markdown(f"<div class='id-exact-value'>{esc(ans.text)}</div>"
-                    f"<div class='id-exact-meta'>{'<br>'.join(rows)}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='id-source'>Source <span class='chip'>{esc(f.label)}</span></div>"
-                f"<div class='id-passage'>{esc(f.line)}</div>", unsafe_allow_html=True)
+        st.info("The page picture is not available for this file.")
 
 
-def render_answer(ans: Answer) -> None:
-    _render_answer(ans)
+def action_row(ans: Answer, idx: int, target: Passage | None, line: str, passages: bool = True) -> None:
+    with st.container(key=f"idact_{idx}", horizontal=True):
+        st.html(copy_button_html(copy_label(ans), copy_text(ans)), width="content", unsafe_allow_javascript=True)
+        if target is not None:
+            ok = can_preview(source_path(target.doc_id), target.page)
+            if st.button("Open page", key=f"open_{idx}", disabled=not ok,
+                         help=None if ok else "No page picture for this file type"):
+                open_page(target.doc_id, target.page, line, target.file_name)
+        if passages and ans.passages:
+            with st.popover("Passages", key=f"pp_{idx}"):
+                render_passages(ans.passages)
+        st.feedback("thumbs", key=f"fb_{idx}")
+
+
+def render_exact(ans: Answer, idx: int, level: str) -> None:
+    f = ans.fact
+    with st.container(key=f"idcard_exact_{idx}"):
+        st.markdown(card_head_html([tag_html("Exact value", "ok")], level), unsafe_allow_html=True)
+        if can_preview(source_path(f.doc_id), f.page):
+            left, right = st.columns([1.55, 1], gap="medium")
+            left.markdown(exact_html(ans), unsafe_allow_html=True)
+            with right.container(key=f"idprev_{idx}"):
+                slot = st.empty()
+            if not show_preview(slot, f.doc_id, f.page, f.line, f.file_name, cached_only=True):
+                slot.markdown(preview_skeleton_html(), unsafe_allow_html=True)
+                deferred.append(lambda: show_preview(slot, f.doc_id, f.page, f.line, f.file_name, cached_only=False))
+        else:
+            st.markdown(exact_html(ans) + preview_caption(f.file_name, f.page), unsafe_allow_html=True)
+        action_row(ans, idx, ans.passages[0] if ans.passages else None, f.line)
+
+
+def render_ai(ans: Answer, idx: int, level: str, trace: Trace) -> None:
+    sources = unique_sources(ans.passages)
+    tags = [tag_html("AI answer", "ai")]
+    if has_numbers(ans.text):
+        tags.append(tag_html("Check value in source", "warn") if ans.unverified else tag_html("Numbers verified", "ok"))
+    with st.container(key=f"idcard_ai_{idx}"):
+        st.markdown(card_head_html(tags, level), unsafe_allow_html=True)
+        st.markdown(cited_html(ans.text, sources), unsafe_allow_html=True)
+        if ans.unverified:
+            st.markdown(f"<div class='id-unverified'>Not found in the passages: {esc(', '.join(ans.unverified))}. "
+                        "Check these in the source.</div>", unsafe_allow_html=True)
+        if sources:
+            st.markdown(source_cards_html(sources), unsafe_allow_html=True)
+        best = sources[0] if sources else None
+        action_row(ans, idx, best, snippet(best.text, trace.question)[1] if best else "")
+    questions = follow_ups(trace.question, trace.retrieved)
+    if questions:
+        with st.container(key=f"idfu_{idx}", horizontal=True):
+            for j, q in enumerate(questions):
+                if st.button(q, key=f"fu_{idx}_{j}"):
+                    ss.pending_question = q
+                    st.rerun()
+
+
+def render_sources(ans: Answer, idx: int, level: str, trace: Trace) -> None:
+    tag = "Quota used up" if is_quota(ans.note) else "AI off"
+    best = ans.passages[0]
+    body, line = snippet(best.text, trace.question)
+    with st.container(key=f"idcard_off_{idx}"):
+        st.markdown(card_head_html([tag_html(tag, "warn")], level), unsafe_allow_html=True)
+        st.markdown(f"{source_line_html(best)}<div class='id-snippet'>{body}</div>", unsafe_allow_html=True)
+        with st.expander(f"All passages ({len(ans.passages)}, full text)"):
+            render_passages(ans.passages)
+        reason = SOURCES_MODE_NOTE + (f" {ans.note}" if ans.note else "")
+        st.markdown(f"<div class='id-reason'>{esc(reason)}</div>", unsafe_allow_html=True)
+        action_row(ans, idx, best, line, passages=False)
+
+
+def render_answer(ans: Answer, trace: Trace, idx: int) -> None:
+    st.markdown(trail_html(trail_steps(ans, trace), trace.seconds), unsafe_allow_html=True)
+    s = get_settings()
+    if ans.mode == "exact" and ans.fact:
+        score = ans.passages[0].score if ans.passages else 1.0
+        render_exact(ans, idx, confidence(score, True, s.min_score, s.fact_match_score))
+    elif ans.mode in AI_MODES or (ans.mode == "sources" and ans.passages):
+        pool = trace.retrieved or ans.passages
+        level = confidence(max(p.score for p in pool), False, s.min_score, s.fact_match_score) if pool else None
+        if ans.mode == "sources":
+            render_sources(ans, idx, level, trace)
+        else:
+            render_ai(ans, idx, level, trace)
+    elif ans.mode in ("not_found", "sources"):
+        with st.container(key=f"idcard_nf_{idx}"):
+            st.markdown(card_head_html([tag_html("Not found", "bad")], None) + not_found_html(),
+                        unsafe_allow_html=True)
+    else:
+        with st.container(key=f"idcard_err_{idx}"):
+            st.markdown(card_head_html([tag_html("Error", "bad")], None) +
+                        f"<div class='id-nf'>{esc(ans.text)}</div>", unsafe_allow_html=True)
     if ans.loading:
         st.caption(f"⏳ {ans.loading}")
 
 
-def _render_answer(ans: Answer) -> None:
-    if ans.mode == "not_found":
-        st.markdown(NOT_FOUND)
-        st.caption("Try rephrasing the question, or upload the document that contains the answer.")
-    elif ans.mode == "sources":
-        st.markdown(f"<span class='id-notice'>{SOURCES_MODE_NOTE}</span>", unsafe_allow_html=True)
-        if ans.note:
-            st.caption(ans.note)
-        with st.expander(f"Sources ({len(ans.passages)} passages)", expanded=True):
-            render_passages(ans.passages)
-    elif ans.mode == "error":
-        st.warning(ans.text)
-    elif ans.mode == "exact":
-        render_exact(ans)
-    else:
-        st.markdown(answer_html(ans.text), unsafe_allow_html=True)
-        if ans.unverified:
-            st.warning(f"Check this value in the source: {', '.join(ans.unverified)} "
-                       "(not found in the retrieved passages).")
-        if ans.passages:
-            with st.expander(f"Sources ({len(ans.passages)})"):
-                render_passages(ans.passages)
-
-
+# --------------------------------------------------------------------------- #
+# Uploads
+# --------------------------------------------------------------------------- #
 def result_messages(r) -> list[tuple[str, str]]:
     """(message kind, text) pairs for an IngestResult."""
     kind = ("success" if r.status in ("added", "replaced") else
@@ -422,20 +317,27 @@ def loading_panel(engine: InfoDeckEngine) -> None:
         st.rerun(scope="app")
 
 
-def answer_question(engine: InfoDeckEngine, question: str) -> Answer:
+# --------------------------------------------------------------------------- #
+# Answering
+# --------------------------------------------------------------------------- #
+def answer_question(engine: InfoDeckEngine, question: str, skeleton) -> tuple[Answer, Trace]:
+    start = time.monotonic()
+    trace = Trace(question=question, docs=len(docs))
     loading = engine.loading_note()  # documents still being read are only partly searchable
-    ans = _answer_question(engine, question)
+    ans = _answer_question(engine, question, skeleton, trace)
     ans.loading = loading
-    return ans
+    trace.seconds = time.monotonic() - start
+    return ans, trace
 
 
-def _answer_question(engine: InfoDeckEngine, question: str) -> Answer:
+def _answer_question(engine: InfoDeckEngine, question: str, skeleton, trace: Trace) -> Answer:
     """Exact value if one matches; else retrieve, then answer with the LLM (streamed) or sources mode."""
     exact = engine.exact_answer(question)
     if exact:
         return exact
     status = resolve_llm(get_settings())
     passages = engine.retrieve(question)
+    trace.retrieved = passages
     if not passages:
         return Answer(NOT_FOUND, "not_found")
     if status.llm is None:
@@ -444,18 +346,26 @@ def _answer_question(engine: InfoDeckEngine, question: str) -> Answer:
     errors: list[str] = []
 
     def stream():
+        first = True
         try:
-            yield from engine.stream_llm(status, question, passages)
+            for piece in engine.stream_llm(status, question, passages):
+                if first:  # the skeleton makes way for the text as it is written
+                    skeleton.empty()
+                    first = False
+                yield piece
         except LLMError as e:
             errors.append(str(e))
 
     live = st.empty()
     with live.container():
-        with st.spinner("Thinking..."):
+        with st.container(key="idcard_live"):
+            st.markdown(card_head_html([tag_html("AI answer", "ai")], None), unsafe_allow_html=True)
             text = st.write_stream(stream())
-    live.empty()  # replaced by the final, formatted answer below
+    live.empty()  # replaced by the final, formatted answer card
     if errors:
+        ai_flags()["quota"] = is_quota(errors[0])
         return engine.sources_answer(passages, f"AI answer failed: {errors[0]}")
+    ai_flags()["quota"] = False
     return engine.finish_llm_answer(status, text if isinstance(text, str) else "".join(text), passages, question)
 
 
@@ -475,6 +385,10 @@ ss.setdefault("messages", [])
 ss.setdefault("uploader_key", 0)
 ss.setdefault("upload_results", [])
 ss.setdefault("watch", set())  # documents this browser tab uploaded that are still being read
+ss.setdefault("preview_failed", set())  # (doc_id, page, line) whose page preview could not be made
+
+topbar = st.empty()
+render_topbar(topbar, engine)
 
 # --------------------------------------------------------------------------- #
 # Sidebar
@@ -483,12 +397,9 @@ with st.sidebar:
     st.markdown(f"<div class='id-brand'><span class='glyph'></span>{APP_NAME}</div>", unsafe_allow_html=True)
 
     status = resolve_llm(get_settings())
-    if status.llm is not None:
-        st.markdown(f"<div class='id-pill on'><span class='dot'></span>{esc(status.label)}</div>",
+    if status.llm is None:
+        st.markdown(f"<div class='id-pill-reason'>AI answers are off: {esc(status.reason)}</div>",
                     unsafe_allow_html=True)
-    else:
-        st.markdown(f"<div class='id-pill off'><span class='dot'></span>Sources mode</div>"
-                    f"<div class='id-pill-reason'>{esc(status.reason)}</div>", unsafe_allow_html=True)
 
     st.subheader("Add documents")
     settings = get_settings()
@@ -541,29 +452,30 @@ with st.sidebar:
 # --------------------------------------------------------------------------- #
 # Main area: chat
 # --------------------------------------------------------------------------- #
-st.markdown(
-    f"<div class='id-hero{' compact' if ss.messages else ''}'>"
-    f"<span class='id-badge'><span class='glyph'></span>{APP_NAME}</span>"
-    f"<div class='id-headline'>{HEADLINE}</div><div class='id-tagline'>{TAGLINE}</div></div>",
-    unsafe_allow_html=True,
-)
+welcome = st.empty()  # headline + example questions, only while the chat is empty
+with welcome.container():
+    if not ss.messages:
+        st.markdown(
+            f"<div class='id-hero'><span class='id-badge'><span class='glyph'></span>{APP_NAME}</span>"
+            f"<div class='id-headline'>{HEADLINE}</div><div class='id-tagline'>{TAGLINE}</div></div>",
+            unsafe_allow_html=True,
+        )
+    if not docs:
+        st.info("Click + in the chat box (or use the sidebar) to add a PDF, Word, Excel, PowerPoint, text or image file.")
+    elif not ss.messages and any(d.file_name.startswith("KRT_") for d in docs):
+        st.markdown("<div class='id-hint'>Try one of these</div>", unsafe_allow_html=True)
+        with st.container(key="samples", horizontal=True):
+            for q in SAMPLE_QUESTIONS:
+                if st.button(q, key=f"sample_{q}"):
+                    ss.pending_question = q
+                    st.rerun()
 
-if not docs:
-    st.info("Click + in the chat box (or use the sidebar) to add a PDF, Word, Excel, PowerPoint, text or image file.")
-elif not ss.messages and any(d.file_name.startswith("KRT_") for d in docs):
-    st.markdown("<div class='id-hint'>Try one of these</div>", unsafe_allow_html=True)
-    with st.container(key="samples", horizontal=True):
-        for q in SAMPLE_QUESTIONS:
-            if st.button(q, key=f"sample_{q}"):
-                ss.pending_question = q
-                st.rerun()
-
-for m in ss.messages:
-    with st.chat_message(m["role"], avatar="📘" if m["role"] == "assistant" else None):
+for i, m in enumerate(ss.messages):
+    with st.chat_message(m["role"]):
         if m["role"] == "user":
             st.markdown(esc(m["content"]), unsafe_allow_html=True)
         else:
-            render_answer(m["answer"])
+            render_answer(m["answer"], m.get("trace") or Trace(), i)
 
 for kind, msg in ss.pop("chat_upload_results", []):
     getattr(st, kind)(msg)
@@ -581,14 +493,22 @@ question = ((typed.text if typed else "") or ss.pop("pending_question", "") or "
 if question and not docs and not engine.jobs.active():
     st.warning("Please add a document first (use the + button).")
 elif question:
+    welcome.empty()
     ss.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(esc(question), unsafe_allow_html=True)
-    with st.chat_message("assistant", avatar="📘"):
+    with st.chat_message("assistant"):
+        skeleton = st.empty()
+        skeleton.markdown(skeleton_html(), unsafe_allow_html=True)
         try:
-            ans = answer_question(engine, question)
+            ans, trace = answer_question(engine, question, skeleton)
         except Exception:
             log.exception("Answering failed")
-            ans = Answer("Sorry, something went wrong while answering. Please try again.", "error")
-        render_answer(ans)
-    ss.messages.append({"role": "assistant", "answer": ans})
+            ans, trace = Answer("Sorry, something went wrong while answering. Please try again.", "error"), Trace()
+        skeleton.empty()
+        render_answer(ans, trace, len(ss.messages))
+    ss.messages.append({"role": "assistant", "answer": ans, "trace": trace})
+    render_topbar(topbar, engine)  # the AI status may have changed (e.g. quota used up)
+
+for load in deferred:  # last: page previews never hold up the answer
+    load()

@@ -42,4 +42,5 @@ InfoDeck is a document Q&A chatbot (RAG). Users upload files and ask questions; 
 - Part 6: Gemini provider (gemini-3.8-flash)
 - Part 7 (51c8c7b): complex documents - OCR, PARSER=local|gemini, structure chunking, exact-value facts index, number check, eval 14/15, 71 tests
 - Part 8: faster big scanned PDFs - parallel OCR (6 workers), background reading queue with "page X of N" in the sidebar, questions while loading, stop/resume; 20-page scan 87-91 s -> 52-54 s, 204 pages ~15 -> ~9 min; eval still 14/15 (--no-llm); 80 tests
+- Part 9: luxury answer UI - glass top bar with live pills, process trail with real counts/time, one card per answer type (exact value with page preview, AI answer with numbered citations + source cards, not found, AI off/quota), confidence meter from retrieval scores, Copy/Open page/Passages/thumbs, follow-up chips from headings, shimmer loading; page previews made on demand after the card (src/infodeck/preview.py, cached in storage/parsed/<doc_id>/preview_*), HTML builders in src/infodeck/ui.py, CSS in app.css; 103 tests
 - Keep this list updated after each part.
