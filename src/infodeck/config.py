@@ -31,16 +31,19 @@ class Settings:
     claude_effort: str = "low"
     gemini_api_key: str = field(default="", repr=False)
     gemini_model: str = "gemini-3.8-flash"
+    parser: str = "local"  # "local" (pdfplumber + local OCR) or "gemini" (page images read by Gemini)
     ollama_model: str = ""
     ollama_host: str = "http://localhost:11434"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"  # "" = no re-ranking
     rerank_candidates: int = 20
     chroma_dir: Path = ROOT / "storage" / "chroma"
+    parsed_dir: Path = ROOT / "storage" / "parsed"  # parsed text per page (also the parse cache)
     upload_dir: Path = ROOT / "data" / "uploads"
     sample_dir: Path = ROOT / "data" / "sample_docs"
     top_k: int = 5
     min_score: float = 0.55
+    fact_match_score: float = 0.80  # exact-value answers need at least this similarity
     chunk_size: int = 800
     chunk_overlap: int = 150
 
@@ -64,6 +67,7 @@ def get_settings() -> Settings:
         claude_effort=get("CLAUDE_EFFORT", "low"),
         gemini_api_key=get("GEMINI_API_KEY", ""),
         gemini_model=get("GEMINI_MODEL", "gemini-3.8-flash"),
+        parser=get("PARSER", "local").lower(),
         ollama_model=get("OLLAMA_MODEL", ""),
         ollama_host=get("OLLAMA_HOST", "http://localhost:11434"),
         embedding_model=get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
@@ -71,19 +75,25 @@ def get_settings() -> Settings:
                      get("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L6-v2"),
         rerank_candidates=int(get("RERANK_CANDIDATES", "20")),
         chroma_dir=_resolve(get("CHROMA_DIR", "storage/chroma")),
+        parsed_dir=_resolve(get("PARSED_DIR", "storage/parsed")),
         upload_dir=_resolve(get("UPLOAD_DIR", "data/uploads")),
         sample_dir=_resolve(get("SAMPLE_DIR", "data/sample_docs")),
         top_k=int(get("TOP_K", "5")),
         min_score=float(get("MIN_SCORE", "0.55")),
+        fact_match_score=float(get("FACT_MATCH_SCORE", "0.80")),
         chunk_size=int(get("CHUNK_SIZE", "800")),
         chunk_overlap=int(get("CHUNK_OVERLAP", "150")),
     )
 
 
+def _api_keys(s: Settings) -> list[str]:
+    return [s.anthropic_api_key, s.gemini_api_key]
+
+
 class SecretRedactingFilter(logging.Filter):
     """Replaces any API key that slips into a log message with '***'."""
 
-    def __init__(self, secrets_getter=lambda: [get_settings().anthropic_api_key, get_settings().gemini_api_key]):
+    def __init__(self, secrets_getter=lambda: _api_keys(get_settings())):
         super().__init__()
         self._secrets_getter = secrets_getter
 
@@ -107,5 +117,6 @@ def setup_logging(level: int = logging.INFO) -> None:
     handler.addFilter(SecretRedactingFilter())
     root.addHandler(handler)
     root.setLevel(level)
-    for noisy in ("httpx", "httpx2", "chromadb", "sentence_transformers", "urllib3", "huggingface_hub"):
+    for noisy in ("httpx", "httpx2", "chromadb", "sentence_transformers", "urllib3", "huggingface_hub",
+                  "google_genai", "RapidOCR"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

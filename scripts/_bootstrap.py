@@ -3,7 +3,8 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from infodeck.config import get_settings, setup_logging  # noqa: E402
 from infodeck.embeddings import CrossEncoderReranker, SentenceTransformerEmbedder  # noqa: E402

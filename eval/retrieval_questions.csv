@@ -1,0 +1,11 @@
+id,type,question,expected_file,expected_page,evidence,expected_answer
+1,answerable,How many earned leave days do I get per year?,KRT_Leave_Policy.pdf,1,18 working days,18 working days (more with long service)
+2,answerable,Do I need a medical certificate for sick leave?,KRT_Leave_Policy.pdf,2,medical certificate,Yes for more than 2 consecutive working days
+3,answerable,What is the hotel limit per night in Mumbai?,KRT_Travel_and_Expense_Policy.pdf,2,"INR 7,000","INR 7,000 per night (Tier 1 city)"
+4,answerable,Within how many days must I submit an expense claim?,KRT_Travel_and_Expense_Policy.pdf,3,within 30 days,Within 30 days of returning; not paid after 60 days
+5,answerable,How long must my password be?,KRT_IT_Security_Policy.pdf,1,14 characters,"14 characters (20 for admin, 32 for service accounts)"
+6,answerable,How quickly must I report a lost laptop?,KRT_IT_Security_Policy.pdf,3,within 2 hours,Within 2 hours
+7,reworded,Can I paste client information into ChatGPT?,KRT_IT_Security_Policy.pdf,3,public AI tools,No - Confidential/Restricted data must never go into public AI tools
+8,reworded,Can my wife come along on a work trip?,KRT_Travel_and_Expense_Policy.pdf,4,Family members may travel,Yes but at the employee's own cost
+9,not_in_docs,What is the dental insurance coverage?,,,,I could not find this in the documents.
+10,not_in_docs,What is the password for the guest WiFi?,,,,I could not find this in the documents.

@@ -27,14 +27,15 @@ log = logging.getLogger("infodeck.app")
 
 HEADLINE = "Every answer, straight from your documents"
 TAGLINE = "Ask questions about your company policies and files. Each answer cites the page it came from."
-MAX_UPLOAD_MB = 50
+MAX_UPLOAD_MB = 200
+UPLOAD_TYPES = ["pdf", "docx", "txt", "xlsx", "csv", "pptx", "png", "jpg", "jpeg"]
 SAMPLE_QUESTIONS = [
     "How many earned leave days do I get per year?",
     "What is the hotel limit per night in Mumbai?",
     "What should I do if I lose my laptop?",
 ]
 # Citations written by the LLM, e.g. [KRT_Leave_Policy.pdf, p.2] or [a.pdf, p.1; b.pdf, p.3]
-CITATION_RE = re.compile(r"\[([^\[\]]+?\.(?:pdf|docx|txt)\b[^\[\]]*)\]", re.IGNORECASE)
+CITATION_RE = re.compile(r"\[([^\[\]]+?\.(?:pdf|docx|txt|xlsx|csv|pptx|png|jpe?g)\b[^\[\]]*)\]", re.IGNORECASE)
 
 st.set_page_config(page_title=APP_NAME, page_icon="📘", layout="centered",
                    initial_sidebar_state="expanded", menu_items={})
@@ -163,6 +164,10 @@ html, body, .stApp, .stMarkdown, button, input, textarea, [data-testid="stWidget
 .id-pill.on  { background: rgba(91, 124, 250, 0.12); border: 1px solid rgba(91, 124, 250, 0.42); color: #b4c3ff; }
 .id-pill.off { background: rgba(255, 122, 69, 0.10); border: 1px solid rgba(255, 122, 69, 0.42); color: #ffb08f; }
 .id-pill-reason { font-size: .78rem; color: var(--muted); margin-bottom: .8rem; }
+.id-pill.exact { background: rgba(52, 211, 153, 0.10); border: 1px solid rgba(52, 211, 153, 0.42); color: #a7f3d0; margin-top: 0; }
+.id-exact-value { font-size: 1.6rem; font-weight: 500; letter-spacing: -0.01em; color: #fafafa; margin: .5rem 0 .2rem 0; }
+.id-exact-meta { font-size: .88rem; color: var(--muted); line-height: 1.7; }
+.id-exact-meta code { color: #e4e4e7; background: rgba(255, 255, 255, .05); }
 
 /* ---------- Buttons: outlined pills ---------- */
 .stButton > button, [data-testid="stPopover"] button {
@@ -286,6 +291,26 @@ def render_passages(passages: list[Passage]) -> None:
         )
 
 
+def render_exact(ans: Answer) -> None:
+    """An answer taken straight from the exact-value / Q&A index (no AI involved)."""
+    f = ans.fact
+    st.markdown("<div class='id-pill exact'><span class='dot'></span>Exact value</div>", unsafe_allow_html=True)
+    if f.kind == "qa":
+        st.markdown(f"<div class='id-exact-meta'>{esc(f.name)}</div><div class='id-passage'>{esc(f.value)}</div>",
+                    unsafe_allow_html=True)
+    else:
+        what = f.name or f.item_title
+        rows = [f"<b>{esc(what)}</b>" + (f" ({esc(f.symbol)})" if f.symbol else "")]
+        if f.formula:
+            rows.append(f"Formula: <code>{esc(f.formula)}</code>")
+        if f.item:
+            rows.append(f"Item {esc(f.item)}" + (f" {esc(f.item_title)}" if f.item_title and f.item_title != what else ""))
+        st.markdown(f"<div class='id-exact-value'>{esc(ans.text)}</div>"
+                    f"<div class='id-exact-meta'>{'<br>'.join(rows)}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='id-source'>Source <span class='chip'>{esc(f.label)}</span></div>"
+                f"<div class='id-passage'>{esc(f.line)}</div>", unsafe_allow_html=True)
+
+
 def render_answer(ans: Answer) -> None:
     if ans.mode == "not_found":
         st.markdown(NOT_FOUND)
@@ -298,8 +323,13 @@ def render_answer(ans: Answer) -> None:
             render_passages(ans.passages)
     elif ans.mode == "error":
         st.warning(ans.text)
+    elif ans.mode == "exact":
+        render_exact(ans)
     else:
         st.markdown(answer_html(ans.text), unsafe_allow_html=True)
+        if ans.unverified:
+            st.warning(f"Check this value in the source: {', '.join(ans.unverified)} "
+                       "(not found in the retrieved passages).")
         if ans.passages:
             with st.expander(f"Sources ({len(ans.passages)})"):
                 render_passages(ans.passages)
@@ -311,11 +341,17 @@ def ingest_files(engine: InfoDeckEngine, files) -> list[tuple[str, str]]:
     bar = st.progress(0.0, text="Preparing...")
     for i, f in enumerate(files):
         bar.progress(i / len(files), text=f"Indexing {f.name} ({i + 1}/{len(files)})")
+
+        def progress(done: int, total: int, note: str, i=i, name=f.name) -> None:
+            text = f"Reading {name}: page {min(done + 1, total)} of {total}" if done < total else \
+                f"Indexing {name} ({total} pages read)"
+            bar.progress(min((i + done / max(total, 1)) / len(files), 1.0), text=f"{text}. {note}".strip(" ."))
+
         try:
             if f.size > MAX_UPLOAD_MB * 1024 * 1024:
                 results.append(("error", f"{f.name} is larger than {MAX_UPLOAD_MB} MB."))
                 continue
-            r = engine.save_and_ingest_upload(f.name, f.getvalue())
+            r = engine.save_and_ingest_upload(f.name, f.getvalue(), progress)
             results.append(("success" if r.status in ("added", "replaced") else
                             "info" if r.status == "duplicate" else "error", r.message))
             results += [("warning", w) for w in r.warnings if w != r.message]
@@ -327,7 +363,10 @@ def ingest_files(engine: InfoDeckEngine, files) -> list[tuple[str, str]]:
 
 
 def answer_question(engine: InfoDeckEngine, question: str) -> Answer:
-    """Retrieve, then answer with the LLM (streamed), or fall back to sources mode."""
+    """Exact value if one matches; else retrieve, then answer with the LLM (streamed) or sources mode."""
+    exact = engine.exact_answer(question)
+    if exact:
+        return exact
     status = resolve_llm(get_settings())
     passages = engine.retrieve(question)
     if not passages:
@@ -350,7 +389,7 @@ def answer_question(engine: InfoDeckEngine, question: str) -> Answer:
     live.empty()  # replaced by the final, formatted answer below
     if errors:
         return engine.sources_answer(passages, f"AI answer failed: {errors[0]}")
-    return engine.finish_llm_answer(status, text if isinstance(text, str) else "".join(text), passages)
+    return engine.finish_llm_answer(status, text if isinstance(text, str) else "".join(text), passages, question)
 
 
 # --------------------------------------------------------------------------- #
@@ -384,7 +423,10 @@ with st.sidebar:
                     f"<div class='id-pill-reason'>{esc(status.reason)}</div>", unsafe_allow_html=True)
 
     st.subheader("Add documents")
-    files = st.file_uploader("PDF, Word or text files", type=["pdf", "docx", "txt"],
+    settings = get_settings()
+    st.caption("Reading pages with Gemini (page images are sent to Google)" if settings.parser == "gemini"
+               else "Reading pages on this computer (scans with local OCR)")
+    files = st.file_uploader("PDF, Word, Excel, PowerPoint, text or image files", type=UPLOAD_TYPES,
                              accept_multiple_files=True, key=f"uploader_{ss.uploader_key}",
                              label_visibility="collapsed")
     if files:
@@ -435,7 +477,7 @@ st.markdown(
 )
 
 if not docs:
-    st.info("Click + in the chat box (or use the sidebar) to add a PDF, Word or text file.")
+    st.info("Click + in the chat box (or use the sidebar) to add a PDF, Word, Excel, PowerPoint, text or image file.")
 elif not ss.messages and any(d.file_name.startswith("KRT_") for d in docs):
     st.markdown("<div class='id-hint'>Try one of these</div>", unsafe_allow_html=True)
     with st.container(key="samples", horizontal=True):
@@ -455,7 +497,7 @@ for kind, msg in ss.pop("chat_upload_results", []):
     getattr(st, kind)(msg)
 
 typed = st.chat_input("Ask a question or attach a document...", accept_file="multiple",
-                      file_type=["pdf", "docx", "txt"])
+                      file_type=UPLOAD_TYPES)
 if typed and typed.files:
     # Index the attached files first; a question typed with them is answered on the next run.
     ss.upload_results = ss.chat_upload_results = ingest_files(engine, typed.files)

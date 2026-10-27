@@ -65,6 +65,9 @@ def settings(tmp_path: Path) -> Settings:
         anthropic_api_key="",
         chroma_dir=tmp_path / "chroma",
         upload_dir=tmp_path / "uploads",
+        parsed_dir=tmp_path / "parsed",
+        parser="local",
+        gemini_api_key="",
         sample_dir=SAMPLE_DIR,
         min_score=0.25,
     )

@@ -13,6 +13,12 @@ chromadb==1.5.9                # local persistent vector store
 # Documents
 pdfplumber==0.11.10        # PDF text + table extraction with page numbers
 python-docx==1.2.0         # Word (.docx) files
+openpyxl==3.1.5            # Excel (.xlsx) files
+python-pptx==1.0.2         # PowerPoint (.pptx) files
+pypdfium2==5.14.0          # renders PDF pages to images (for OCR and PARSER=gemini)
+pillow==12.3.0             # image files
+rapidocr==3.10.0           # local OCR for scanned pages and photos (models included, pip only)
+onnxruntime==1.31.0        # runs the OCR models on the CPU
 
 # App + config
 streamlit==1.66.0

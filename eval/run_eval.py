@@ -53,7 +53,7 @@ def check_gold(rows, sample_dir: Path) -> None:
 
 def main() -> None:
     settings = get_settings()
-    rows = list(csv.DictReader(open(EVAL_DIR / "questions.csv", encoding="utf-8")))
+    rows = list(csv.DictReader(open(EVAL_DIR / "retrieval_questions.csv", encoding="utf-8")))
     check_gold(rows, settings.sample_dir)
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -96,7 +96,7 @@ def main() -> None:
         "# InfoDeck evaluation results",
         "",
         f"Run on {date.today().isoformat()} with the 3 fictional sample PDFs "
-        f"({len(rows)} questions in `eval/questions.csv`).  ",
+        f"({len(rows)} questions in `eval/retrieval_questions.csv`).  ",
         f"Embedding model `{settings.embedding_model}`, re-ranker `{settings.rerank_model or 'off'}`, "
         f"top-k {settings.top_k}, MIN_SCORE {current:.2f}.",
         "",

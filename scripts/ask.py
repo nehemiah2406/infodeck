@@ -16,7 +16,13 @@ print(f"AI mode: {status.label}" + (f" - {status.reason}" if status.reason else 
 for question in sys.argv[1:]:
     ans = engine.answer(question, status)
     print("\n" + "=" * 78 + f"\nQ: {question}\n" + "-" * 78)
-    print(ans.text)
+    if ans.mode == "exact":
+        f = ans.fact
+        print(f"Exact value: {ans.text}" + (f"\nFormula: {f.formula}" if f.formula else ""))
+    else:
+        print(ans.text)
+    if ans.unverified:
+        print(f"(Check this value in the source: {', '.join(ans.unverified)})")
     if ans.note:
         print(f"({ans.note})")
     for i, p in enumerate(ans.passages, 1):

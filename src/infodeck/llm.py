@@ -100,7 +100,9 @@ class GeminiLLM:
 
         self._errors = errors
         self._types = types
-        self._client = client or genai.Client(api_key=api_key)
+        # A busy server (429/503) is retried a few times before the answer falls back to sources mode.
+        retry = types.HttpRetryOptions(attempts=3, http_status_codes=[429, 500, 503])
+        self._client = client or genai.Client(api_key=api_key, http_options=types.HttpOptions(retry_options=retry))
         self.model = model
         self.label = f"Gemini ({model})"
 
@@ -122,7 +124,10 @@ class GeminiLLM:
             if e.code == 404:
                 raise LLMError(f"Gemini model '{self.model}' was not found. Check GEMINI_MODEL in .env.") from None
             if e.code == 429:
-                raise LLMError("Too many requests to Gemini right now. Please wait a minute and try again.") from None
+                from .gemini_parser import quota_exhausted_message
+
+                quota = quota_exhausted_message(e)
+                raise LLMError(quota or "Too many requests to Gemini right now. Please wait a minute and try again.") from None
             raise LLMError("Gemini could not process this request. Please try a shorter question.") from None
         except e_.APIError as e:
             log.warning("Gemini API error (status %s)", e.code)

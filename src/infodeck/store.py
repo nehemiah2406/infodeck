@@ -16,8 +16,10 @@ from chromadb.config import Settings as ChromaSettings
 
 from .chunking import Chunk
 from .embeddings import Embedder
+from .facts import Fact
 
 COLLECTION = "infodeck"
+FACTS_COLLECTION = "infodeck_facts"  # exact values and Q&A pairs (see facts.py)
 
 
 def file_hash(path: Path) -> str:
@@ -61,6 +63,9 @@ class VectorStore:
         self._col = self._client.get_or_create_collection(
             COLLECTION, configuration={"hnsw": {"space": "cosine"}}
         )
+        self._facts = self._client.get_or_create_collection(
+            FACTS_COLLECTION, configuration={"hnsw": {"space": "cosine"}}
+        )
         self.embedder = embedder
         self._lock = threading.Lock()  # Streamlit serves several users from one process
 
@@ -95,6 +100,36 @@ class VectorStore:
     def remove_document(self, doc_id: str) -> None:
         with self._lock:
             self._col.delete(where={"doc_id": doc_id})
+            self._facts.delete(where={"doc_id": doc_id})
+
+    # ---- facts (exact values, Q&A) ----------------------------------------- #
+    def add_facts(self, doc_id: str, facts: list[Fact]) -> int:
+        if not facts:
+            return 0
+        vectors = self.embedder.embed_documents([f.embed_text for f in facts])
+        with self._lock:
+            self._facts.add(
+                ids=[f"{doc_id}-f{i}" for i in range(len(facts))],
+                embeddings=vectors,
+                documents=[f.embed_text for f in facts],
+                metadatas=[{**f.to_metadata(), "doc_id": doc_id} for f in facts],
+            )
+        return len(facts)
+
+    def search_facts(self, question: str, k: int = 5) -> list[tuple[Fact, float]]:
+        """Facts whose name (or question) is most similar to the question, with cosine similarity."""
+        n = self._facts.count()
+        if n == 0:
+            return []
+        res = self._facts.query(query_embeddings=[self.embedder.embed_query(question)], n_results=min(k, n),
+                                include=["metadatas", "distances"])
+        return [(Fact(**m), round(1.0 - d, 4)) for m, d in zip(res["metadatas"][0], res["distances"][0])]
+
+    def facts_with_symbol(self, symbols: list[str]) -> list[Fact]:
+        if not symbols or self._facts.count() == 0:
+            return []
+        res = self._facts.get(where={"symbol": {"$in": symbols}}, include=["metadatas"])
+        return [Fact(**m) for m in res["metadatas"]]
 
     def list_documents(self) -> list[DocumentInfo]:
         metas = self._col.get(include=["metadatas"])["metadatas"]

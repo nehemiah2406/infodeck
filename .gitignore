@@ -12,6 +12,10 @@
 *.xlsx
 *.pptx
 !data/sample_docs/*.pdf
+# Fictional evaluation documents (scripts/make_eval_docs.py)
+!data/eval_docs/*.pdf
+!data/eval_docs/*.docx
+!data/eval_docs/*.xlsx
 data/uploads/
 
 # ---- Generated data ----
