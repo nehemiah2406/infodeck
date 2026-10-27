@@ -30,7 +30,7 @@ def file_hash(path: Path) -> str:
 
 @dataclass
 class Passage:
-    text: str
+    text: str 
     file_name: str
     page: int
     section: str
