@@ -30,7 +30,7 @@ class Settings:
     claude_model: str = "claude-sonnet-5-5"
     claude_effort: str = "low"
     gemini_api_key: str = field(default="", repr=False)
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
     ollama_model: str = ""
     ollama_host: str = "http://localhost:11434"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -63,7 +63,7 @@ def get_settings() -> Settings:
         claude_model=get("CLAUDE_MODEL", "claude-sonnet-5-5"),
         claude_effort=get("CLAUDE_EFFORT", "low"),
         gemini_api_key=get("GEMINI_API_KEY", ""),
-        gemini_model=get("GEMINI_MODEL", "gemini-2.5-flash"),
+        gemini_model=get("GEMINI_MODEL", "gemini-3.8-flash"),
         ollama_model=get("OLLAMA_MODEL", ""),
         ollama_host=get("OLLAMA_HOST", "http://localhost:11434"),
         embedding_model=get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),

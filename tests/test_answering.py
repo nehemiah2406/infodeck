@@ -145,4 +145,4 @@ def test_gemini_without_key_means_sources_mode():
 
 def test_gemini_key_present_selects_gemini_without_network_call():
     status = resolve_llm(Settings(llm_provider="gemini", gemini_api_key="AIza-test-123456789"))
-    assert status.mode == "gemini" and "gemini-2.5-flash" in status.label
+    assert status.mode == "gemini" and "gemini-3.8-flash" in status.label

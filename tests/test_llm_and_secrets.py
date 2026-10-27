@@ -137,7 +137,7 @@ class FakeGeminiClient:
 def test_gemini_streams_text_and_maps_errors_without_leaking_key():
     from google.genai import errors
 
-    llm = GeminiLLM(FAKE_KEY, "gemini-2.5-flash", client=FakeGeminiClient(["Hello", None, " world"]))
+    llm = GeminiLLM(FAKE_KEY, "gemini-3.8-flash", client=FakeGeminiClient(["Hello", None, " world"]))
     assert "".join(llm.stream("s", "u")) == "Hello world"
     for code, match in [(403, "GEMINI_API_KEY"), (404, "GEMINI_MODEL"), (429, "Too many"), (503, "problems")]:
         error_cls = errors.ClientError if code < 500 else errors.ServerError
