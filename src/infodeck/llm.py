@@ -27,10 +27,9 @@ GEMINI_SDK_RETRY_CODES = [500, 503]
 GEMINI_SDK_ATTEMPTS = 3  # 1 try + 2 retries, waiting ~1 s and ~2 s in between
 GEMINI_RATE_LIMIT_RETRIES = 2
 GEMINI_RATE_LIMIT_MAX_WAIT = 10.0  # seconds per wait
-# A question waits at most this long for Gemini's first text (all retries included); then the
-# answer falls back to sources mode. Once text is arriving, only a pause longer than
-# GEMINI_TIMEOUT_SECONDS (.env) stops it, so long, healthy answers are not cut off.
-GEMINI_MAX_WAIT = 45.0
+# A question waits at most GEMINI_MAX_WAIT_SECONDS (.env) for Gemini's first text (all retries
+# included); then the answer falls back to sources mode. Once text is arriving, only a pause longer
+# than GEMINI_TIMEOUT_SECONDS (.env) stops it, so long, healthy answers are not cut off.
 GEMINI_BUSY = "Gemini is busy right now. Showing the matching passages instead. Please try again in a minute."
 # Used-up Gemini quotas, kept until the app restarts: hash of (API key, model) -> message.
 _used_up_quotas: dict[str, str] = {}
@@ -121,7 +120,7 @@ class _NoReply(Exception):
 
 class GeminiLLM:
     def __init__(self, api_key: str, model: str, client=None, sleep: Callable[[float], None] = time.sleep,
-                 timeout: float = 30.0, max_wait: float = GEMINI_MAX_WAIT):
+                 timeout: float = 15.0, max_wait: float = 15.0):
         from google import genai
         from google.genai import errors, types
 
@@ -301,7 +300,7 @@ def resolve_llm(settings: Settings) -> LLMStatus:
                              f"{used_up} AI answers stay off until the app is restarted.")
         try:
             llm = GeminiLLM(settings.gemini_api_key, settings.gemini_model,
-                            timeout=settings.gemini_timeout_seconds)
+                            timeout=settings.gemini_timeout_seconds, max_wait=settings.gemini_max_wait_seconds)
         except Exception:
             log.exception("Could not create Gemini client")
             return LLMStatus(None, "sources", "Sources mode", "The Gemini client could not be started.")
