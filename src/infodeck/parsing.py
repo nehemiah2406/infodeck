@@ -21,6 +21,7 @@ from pathlib import Path
 from .config import Settings
 from .gemini_parser import GeminiPageReader, ParseError
 from .loaders import IMAGE_EXTENSIONS, MIN_CHARS_PER_PAGE, LoadedDocument, Page, Progress, load_document
+from .ocr import broken_numbers
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,9 @@ PARSE_DPI = 200
 GEMINI_WORKERS = 4  # pages read in parallel
 GEMINI_EXTENSIONS = {".pdf"} | IMAGE_EXTENSIONS  # file types read as page images in gemini mode
 META_FILE = "meta.json"
+# Local parses made before OCR re-read broken numbers ("10).6") lack this marker; their pages
+# with broken numbers are read again (see pages_to_recheck).
+NUMBER_CHECK = 1
 
 
 def parser_name(settings: Settings, path: Path) -> str:
@@ -48,6 +52,10 @@ def parse_document(path: Path, name: str, doc_id: str, settings: Settings,
     if meta.get("parser") != parser:  # parsed before with another parser/model: start again
         shutil.rmtree(out, ignore_errors=True)
         meta = {}
+    if meta.get("complete") and parser == "local" and pages_to_recheck(out, meta):
+        log.info("Reading %s again: its cached pages have broken OCR numbers", name)
+        shutil.rmtree(out, ignore_errors=True)
+        meta = {}
     if meta.get("complete"):
         log.info("Using cached parse of %s (%s)", name, parser)
         return _load_cached(out, name, meta)
@@ -59,8 +67,24 @@ def parse_document(path: Path, name: str, doc_id: str, settings: Settings,
     else:
         doc = _parse_with_gemini(path, name, out, settings, progress, gemini_client)
     write_meta(out, {"file_name": name, "parser": parser, "complete": True, "page_count": doc.page_count,
-                      "pages": [p.number for p in doc.pages], "warnings": doc.warnings})
+                      "pages": [p.number for p in doc.pages], "warnings": doc.warnings,
+                      "number_check": NUMBER_CHECK})
     return doc
+
+
+def pages_to_recheck(folder: Path, meta: dict) -> list[int]:
+    """Pages of a complete local parse made before broken OCR numbers were re-read, that have one."""
+    if meta.get("number_check") == NUMBER_CHECK:
+        return []
+    stale = []
+    for n in meta.get("pages", []):
+        try:
+            text = (folder / f"page_{n}.md").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if any(broken_numbers(line) for line in text.splitlines()):
+            stale.append(n)
+    return stale
 
 
 def read_meta(folder: Path) -> dict:

@@ -29,7 +29,7 @@ from .jobs import IngestJob, IngestQueue, JobCancelled
 from .llm import LLMError, LLMStatus
 from .loaders import (HEADER_SAMPLE_PAGES, MIN_CHARS_PER_PAGE, SUPPORTED_EXTENSIONS, Page, Progress,
                       UnsupportedFileError, iter_pdf_pages, pdf_warnings, repeated_lines, strip_lines)
-from .parsing import is_partial, parse_document, read_meta, write_meta
+from .parsing import NUMBER_CHECK, is_partial, pages_to_recheck, parse_document, read_meta, write_meta
 from .prompts import NOT_FOUND, SOURCES_MODE_NOTE, SYSTEM_PROMPT, build_user_prompt
 from .store import Passage, VectorStore, file_hash
 
@@ -255,7 +255,14 @@ class InfoDeckEngine:
             shutil.rmtree(out, ignore_errors=True)
             meta = {}
         if meta.get("complete"):  # read completely before: index it from the parse cache
-            return self.ingest_file(path, name, progress=job.update)
+            stale = pages_to_recheck(out, meta)
+            if not stale:
+                return self.ingest_file(path, name, progress=job.update)
+            # Read before broken OCR numbers ("10).6") were re-read: read just those pages again.
+            log.info("Reading %d page(s) of %s again (broken OCR numbers)", len(stale), name)
+            for n in stale:
+                (out / f"page_{n}.md").unlink(missing_ok=True)
+            write_meta(out, {**meta, "complete": False})
         out.mkdir(parents=True, exist_ok=True)
         known = {}  # pages read before the app was closed
         for f in out.glob("page_*.md"):
@@ -314,7 +321,7 @@ class InfoDeckEngine:
 
         warnings = pdf_warnings(name, all_pages, ocr_pages)
         write_meta(out, {"file_name": name, "parser": "local", "complete": True, "page_count": total,
-                         "pages": [p.number for p in kept], "warnings": warnings})
+                         "pages": [p.number for p in kept], "warnings": warnings, "number_check": NUMBER_CHECK})
         if not kept:
             msg = warnings[0] if warnings else f"{name} contains no text."
             return IngestResult("no_text", name, msg, pages=total, warnings=warnings)

@@ -18,7 +18,9 @@ import io
 import logging
 import multiprocessing
 import os
+import re
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future, ProcessPoolExecutor
 
 log = logging.getLogger(__name__)
@@ -37,14 +39,15 @@ def _load_engine(threads: int = -1):
 
 def ocr_image(image) -> str:
     """Read the text in a PIL image (in this process), one output line per printed line."""
-    global _engine
-    import numpy as np
-
     with _engine_lock:  # the OCR engine is not thread-safe; also loads its models only once
-        if _engine is None:
-            _engine = _load_engine()
-        result = _engine(np.array(image.convert("RGB")))
-    return _result_text(result)
+        return "\n".join(text for text, _ in _read_lines(_get_engine(), image))
+
+
+def _get_engine():
+    global _engine
+    if _engine is None:
+        _engine = _load_engine()
+    return _engine
 
 
 def _result_boxes(result) -> list[tuple[float, float, float, float, str]]:
@@ -54,27 +57,132 @@ def _result_boxes(result) -> list[tuple[float, float, float, float, str]]:
             for box, text in zip(result.boxes, result.txts) if text.strip()]
 
 
-def _result_text(result) -> str:
-    return join_ocr_lines(_result_boxes(result))
-
-
 def ocr_line_boxes(image) -> list[tuple[str, tuple[float, float, float, float]]]:
     """OCR a PIL image (in this process) into (line text, (left, top, right, bottom)) in pixels.
 
-    Used for page previews; the lines are grouped exactly like the text read at upload.
+    Used for page previews; the lines are read exactly like the text read at upload.
     """
-    global _engine
+    with _engine_lock:
+        return _read_lines(_get_engine(), image)
+
+
+def _read_lines(engine, image) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """OCR an image into lines; lines with broken numbers are re-read (see recheck_numbers)."""
     import numpy as np
 
-    with _engine_lock:
-        if _engine is None:
-            _engine = _load_engine()
-        result = _engine(np.array(image.convert("RGB")))
+    image = image.convert("RGB")
+    # The engine remembers use_det/use_cls/use_rec from its last call, so always pass them.
+    result = engine(np.array(image), use_det=True, use_cls=True, use_rec=True)
     out = []
     for line in group_ocr_lines(_result_boxes(result)):
         box = (min(b[2] for b in line), min(b[0] for b in line), max(b[3] for b in line), max(b[1] for b in line))
-        out.append((_line_text(line), box))
+        text = _line_text(line)
+        if broken_numbers(text):
+            text = recheck_numbers(text, lambda scale, line=line: _reread_line(engine, image, line, scale))
+        out.append((text, box))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Broken numbers ("10).6", "(0).534", "5,940) kN")
+# --------------------------------------------------------------------------- #
+# OCR sometimes reads a speck or a thin line next to a digit as a bracket. Such a number
+# is never guessed or "cleaned up": each text box of the line is cut out of the page image
+# and read again on its own, as it is and enlarged 2x (a single box is read more reliably
+# than a whole page). Only if both reads show exactly the same numbers as the line without
+# those brackets is the line changed.
+_NUMBER_RUN = re.compile(r"[\d.,()]*\d[\d.,()]*")
+_INNER_BRACKET = re.compile(r"\d[()][.,]?\d")  # a bracket between digits: "10).6", "(0).534"
+_LIST_NUMBER = re.compile(r"\(?\d{1,2}\)")  # "1)" or "(1)" at the start of a line
+RECHECK_SCALES = (1.0, 2.0)  # every re-read must agree
+
+
+def _unmatched_brackets(line: str) -> set[int]:
+    """Positions of brackets in the line that have no partner."""
+    opened, unmatched = [], set()
+    for i, ch in enumerate(line):
+        if ch == "(":
+            opened.append(i)
+        elif ch == ")":
+            if opened:
+                opened.pop()
+            else:
+                unmatched.add(i)
+    return unmatched | set(opened)
+
+
+def _broken_runs(line: str) -> list[re.Match]:
+    unmatched = _unmatched_brackets(line)
+    found = []
+    for m in _NUMBER_RUN.finditer(line):
+        token = m.group()
+        if "(" not in token and ")" not in token:
+            continue
+        if m.start() == 0 and _LIST_NUMBER.fullmatch(token):
+            continue
+        if _INNER_BRACKET.search(token) or any(m.start() <= i < m.end() for i in unmatched):
+            found.append(m)
+    return found
+
+
+def broken_numbers(line: str) -> list[str]:
+    """Numbers in an OCR line with a stray bracket inside or next to them, e.g. '10).6'."""
+    return [m.group() for m in _broken_runs(line)]
+
+
+def _numbers(text: str) -> list[str]:
+    return [m.group().strip(".,") for m in _NUMBER_RUN.finditer(text)]
+
+
+def recheck_numbers(line: str, reread: Callable[[float], str]) -> str:
+    """Fix the broken numbers of a line only if a second read of the image confirms them.
+
+    reread(scale) reads the line again from the image, enlarged by scale. The brackets of the
+    broken numbers are dropped ('10).6' -> '10.6') only if EVERY re-read (one per scale in
+    RECHECK_SCALES) has exactly the same numbers, in the same order, as the line without those
+    brackets. Nothing else is ever changed: if a re-read disagrees (e.g. '5.940' for '5,940)'),
+    the line is kept exactly as it was read (and gives no exact-value card).
+    """
+    runs = _broken_runs(line)
+    if not runs:
+        return line
+    fixed = line
+    for m in reversed(runs):
+        fixed = fixed[:m.start()] + m.group().replace("(", "").replace(")", "") + fixed[m.end():]
+    expected = _numbers(fixed)
+    try:
+        confirmed = all(_numbers(reread(scale)) == expected for scale in RECHECK_SCALES)
+    except Exception:
+        log.warning("Re-reading an OCR line failed", exc_info=True)
+        confirmed = False
+    if not confirmed:
+        log.warning("OCR numbers kept as read (a second read did not confirm them): %s",
+                    ", ".join(m.group() for m in runs))
+        return line
+    log.info("OCR numbers confirmed by a second read: %s",
+             ", ".join(f"{m.group()} -> {m.group().replace('(', '').replace(')', '')}" for m in runs))
+    return fixed
+
+
+def _reread_line(engine, image, line: list[tuple], scale: float) -> str:
+    """Read one OCR line of a page image again, box by box (recognition only, no detection).
+
+    Each box is cut out with a small margin and enlarged by `scale`. Recognition alone takes
+    ~0.03 s per box; detection would first blow a thin strip up to a huge image (~3 s).
+    """
+    import numpy as np
+    from PIL import Image
+
+    boxes = []
+    for top, bottom, left, right, _ in line:
+        pad = 0.3 * (bottom - top)
+        crop = image.crop((max(0, int(left - pad)), max(0, int(top - pad)),
+                           min(image.width, int(right + pad) + 1), min(image.height, int(bottom + pad) + 1)))
+        if scale != 1.0:
+            crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS)
+        result = engine(np.array(crop), use_det=False, use_cls=False, use_rec=True)
+        boxes.append((top, bottom, left, right, " ".join(result.txts or ())))
+    return _line_text(boxes)
 
 
 def join_ocr_lines(boxes: list[tuple[float, float, float, float, str]]) -> str:
@@ -117,11 +225,10 @@ def _init_worker(threads: int) -> None:
 
 def _ocr_png(png: bytes) -> str:
     """Runs in a worker process."""
-    import numpy as np
     from PIL import Image
 
     with Image.open(io.BytesIO(png)) as im:
-        return _result_text(_engine(np.array(im.convert("RGB"))))
+        return "\n".join(text for text, _ in _read_lines(_engine, im))
 
 
 def png_bytes(image) -> bytes:

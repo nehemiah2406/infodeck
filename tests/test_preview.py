@@ -87,7 +87,7 @@ def test_ocr_line_boxes_groups_words_like_the_upload_text(monkeypatch):
                  [(10, 60), (90, 60), (90, 80), (10, 80)]]
         txts = ["Push-up", "distance", "10.6 mm"]
 
-    monkeypatch.setattr(ocr, "_engine", lambda array: Result())
+    monkeypatch.setattr(ocr, "_engine", lambda array, **options: Result())
     lines = ocr.ocr_line_boxes(Image.new("RGB", (200, 100)))
     assert lines == [("Push-up distance", (10, 10, 120, 30)), ("10.6 mm", (10, 60, 90, 80))]
     assert ocr.join_ocr_lines(ocr._result_boxes(Result())) == "Push-up distance\n10.6 mm"
