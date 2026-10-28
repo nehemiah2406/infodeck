@@ -17,6 +17,8 @@
 !data/eval_docs/*.docx
 !data/eval_docs/*.xlsx
 data/uploads/
+# Exact-value eval questions (tests/exact_eval.py): they quote document text, NEVER commit
+data/eval/
 
 # ---- Generated data ----
 # ChromaDB vector store (persistent folder)

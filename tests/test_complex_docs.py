@@ -13,7 +13,7 @@ from google.genai import errors
 
 from infodeck.chunking import chunk_pages
 from infodeck.engine import InfoDeckEngine, unverified_numbers
-from infodeck.facts import extract_facts, question_covered
+from infodeck.facts import extract_facts, match_quality
 from infodeck.gemini_parser import GeminiPageReader, ParseError
 from infodeck.loaders import Page, load_document
 from infodeck.store import Passage, VectorStore
@@ -299,8 +299,8 @@ def test_unrelated_or_near_miss_questions_do_not_match_exactly(loaded_engine, tm
 
 def test_word_guard_rejects_a_similar_name_with_a_different_meaning():
     [fact] = extract_facts([Page(1, "(1) Push-up distance, 10.6 mm")], "calc.pdf")
-    assert question_covered("What is the push-up distance in mm?", fact)
-    assert not question_covered("What is the push-up force?", fact)
+    assert match_quality("What is the push-up distance in mm?", fact)
+    assert not match_quality("What is the push-up force?", fact)
 
 
 def test_two_documents_with_different_values_are_not_answered_exactly(engine, tmp_path):

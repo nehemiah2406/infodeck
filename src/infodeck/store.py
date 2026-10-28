@@ -132,6 +132,29 @@ class VectorStore:
         res = self._facts.get(where={"symbol": {"$in": symbols}}, include=["metadatas"])
         return [Fact(**m) for m in res["metadatas"]]
 
+    def document_facts(self, doc_id: str) -> list[tuple[str, Fact]]:
+        """(id, fact) for every fact of one document."""
+        res = self._facts.get(where={"doc_id": doc_id}, include=["metadatas"])
+        return [(i, Fact(**m)) for i, m in zip(res["ids"], res["metadatas"])]
+
+    def fact_ids(self, fact: Fact) -> list[str]:
+        """Ids of the stored fact(s) with this document, source line and value."""
+        res = self._facts.get(where={"$and": [{"doc_id": fact.doc_id}, {"line": fact.line}, {"value": fact.value}]})
+        return res["ids"]
+
+    def update_facts(self, ids: list[str], **fields) -> None:
+        """Change metadata fields (e.g. unsafe=True) of the given facts."""
+        if not ids:
+            return
+        with self._lock:
+            res = self._facts.get(ids=ids, include=["metadatas"])
+            self._facts.update(ids=res["ids"], metadatas=[{**m, **fields} for m in res["metadatas"]])
+
+    def unchecked_documents(self) -> list[str]:
+        """Documents with facts the upload self-test has not checked yet (e.g. indexed before it existed)."""
+        metas = self._facts.get(include=["metadatas"])["metadatas"]
+        return sorted({m["doc_id"] for m in metas if not m.get("checked")})
+
     def list_documents(self) -> list[DocumentInfo]:
         metas = self._col.get(include=["metadatas"])["metadatas"]
         docs: dict[str, DocumentInfo] = {}

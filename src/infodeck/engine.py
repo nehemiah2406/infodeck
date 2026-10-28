@@ -23,7 +23,7 @@ from pathlib import Path
 from .chunking import Chunker, chunk_pages
 from .config import Settings
 from .embeddings import Reranker
-from .facts import Fact, FactExtractor, extract_facts, format_fact_answer, question_covered, symbol_in_question
+from .facts import Fact, FactExtractor, extract_facts, format_fact_answer, match_quality, symbol_in_question
 from .gemini_parser import ParseError
 from .jobs import IngestJob, IngestQueue, JobCancelled
 from .llm import LLMError, LLMStatus
@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 SOURCES_MODE_MAX_PASSAGES = 3
 SAMPLES_MARKER = ".samples_loaded"
 COMMIT_EVERY_PAGES = 5  # while a big PDF loads, finished pages become searchable in batches of this size
-FACT_AMBIGUITY_MARGIN = 0.02  # two facts this close in score with different values: not an exact match
+FACT_CANDIDATES = 10  # facts with a similar name looked at per question (all must agree on the value)
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 BRACKETS_RE = re.compile(r"\[[^\[\]]*\]")  # citations like [file.pdf, p.3]
 
@@ -137,17 +137,24 @@ class InfoDeckEngine:
             msg = doc.warnings[0] if doc.warnings else f"{name} contains no text."
             return IngestResult("no_text", name, msg, pages=doc.page_count, warnings=doc.warnings)
 
-        chunks = chunk_pages(doc.pages, name, self.settings.chunk_size, self.settings.chunk_overlap)
         old_versions = [d for d in self.store.find_by_name(name) if d != doc_id]
         for old in old_versions:  # same file name, new content: replace the old version
             self.remove_document(old, delete_file=False)
-        n = self.store.add_document(doc_id, chunks, doc.page_count, str(path))
-        n_facts = self.store.add_facts(doc_id, extract_facts(doc.pages, name, doc_id))
+        n, n_facts = self.index_pages(doc_id, name, doc.pages, doc.page_count, str(path))
         status = "replaced" if old_versions else "added"
         verb = "Updated" if old_versions else "Added"
         log.info("%s %s: %d pages, %d chunks, %d exact values", verb, name, doc.page_count, n, n_facts)
         return IngestResult(status, name, f"{verb} {name} ({doc.page_count} pages).",
                             pages=doc.page_count, chunks=n, warnings=doc.warnings)
+
+    def index_pages(self, doc_id: str, name: str, pages: list[Page], page_count: int,
+                    source_path: str) -> tuple[int, int]:
+        """Index parsed pages: passages and exact values. Returns (chunks, exact values)."""
+        chunks = chunk_pages(pages, name, self.settings.chunk_size, self.settings.chunk_overlap)
+        n = self.store.add_document(doc_id, chunks, page_count, source_path)
+        n_facts = self.store.add_facts(doc_id, extract_facts(pages, name, doc_id))
+        self.self_test_facts(doc_id, name)
+        return n, n_facts
 
     def ingest_folder(self, folder: Path) -> list[IngestResult]:
         files = sorted(p for p in Path(folder).glob("*") if p.suffix.lower() in SUPPORTED_EXTENSIONS)
@@ -320,6 +327,7 @@ class InfoDeckEngine:
         commit(batch)
         job.check_cancelled()
 
+        self.self_test_facts(doc_id, name)  # all exact values are in now
         warnings = pdf_warnings(name, all_pages, ocr_pages)
         write_meta(out, {"file_name": name, "parser": "local", "complete": True, "page_count": total,
                          "pages": [p.number for p in kept], "warnings": warnings, "number_check": NUMBER_CHECK})
@@ -380,24 +388,54 @@ class InfoDeckEngine:
     def match_fact(self, question: str) -> tuple[Fact, float] | None:
         """The stored fact that answers the question exactly, or None if there is no safe match.
 
-        A fact matches if the question names its symbol (e.g. "What is σra?"), or if its name is
-        similar enough (score >= FACT_MATCH_SCORE) AND every content word of the question appears
-        in the fact. Two close matches with different values are treated as no match.
+        Candidates: facts whose symbol the question names (e.g. "What is σra?"), and facts whose name
+        is similar enough (score >= FACT_MATCH_SCORE). Every candidate must pass the safety check
+        (facts.match_quality): the question's main subject must be in the fact's own name, so a symbol
+        mentioned only as a reference ("grip stress corresponding to Pd") never decides the match.
+        Facts the upload self-test marked unsafe are skipped. If the remaining candidates (the "tight"
+        ones, whose whole name is in the question, if any) have different values: no exact answer.
         """
         tokens = [t for t in re.findall(r"[^\s?!,;:()]+", question) if len(t) >= 2]
-        by_symbol = [f for f in self.store.facts_with_symbol(tokens) if symbol_in_question(question, f.symbol)]
-        if by_symbol and len({(f.value, f.unit) for f in by_symbol}) == 1:
-            return by_symbol[0], 1.0
-        candidates = [(f, s) for f, s in self.store.search_facts(question, 5)
-                      if s >= self.settings.fact_match_score and question_covered(question, f)]
-        if not candidates:
+        pool: dict[tuple, tuple[Fact, float]] = {}
+        for f in self.store.facts_with_symbol(tokens):
+            if symbol_in_question(question, f.symbol):
+                pool[(f.doc_id, f.line, f.value)] = (f, 1.0)
+        for f, s in self.store.search_facts(question, FACT_CANDIDATES):
+            if s >= self.settings.fact_match_score:
+                pool.setdefault((f.doc_id, f.line, f.value), (f, s))
+        checked = [(f, s, q) for f, s in pool.values() if not f.unsafe and (q := match_quality(question, f))]
+        group = [c for c in checked if c[2] == "tight"] or checked
+        if not group:
             return None
-        best, score = candidates[0]
-        if any(score - s <= FACT_AMBIGUITY_MARGIN and (f.value, f.unit) != (best.value, best.unit)
-               for f, s in candidates[1:]):
-            log.info("Exact-value match is ambiguous for %r", question)
+        if len({(f.value, f.unit) for f, _, _ in group}) > 1:
+            log.info("Exact-value match is ambiguous for %r: %d items with different values", question, len(group))
             return None
+        best, score, _ = max(group, key=lambda c: c[1])
         return best, score
+
+    def self_test_facts(self, doc_id: str, name: str = "") -> int:
+        """Upload self-test: ask every exact value of a document its own name as a question. If the
+        answer is a different value, both facts are marked unsafe and never shown as an exact answer
+        (the AI / passages answer is used for them). Returns the number of facts marked unsafe."""
+        facts = self.store.document_facts(doc_id)
+        unsafe: set[str] = set()
+        for fact_id, f in facts:
+            # Its own name (a nameless "where, f = 0.534" by its symbol), never its item's title
+            question = f.name if f.kind == "qa" else (f"What is the {f.name}?" if f.name else f"What is {f.symbol}?")
+            match = self.match_fact(question)
+            if match and (match[0].value, match[0].unit) != (f.value, f.unit):
+                log.info("Self-test: '%s' answered with another value (%s p.%d) - both marked unsafe",
+                         f.embed_text, match[0].file_name, match[0].page)
+                unsafe |= {fact_id, *self.store.fact_ids(match[0])}
+        self.store.update_facts(sorted(unsafe), unsafe=True)
+        self.store.update_facts([i for i, _ in facts], checked=True)
+        log.info("Exact-value self-test for %s: %d of %d facts marked unsafe", name or doc_id, len(unsafe), len(facts))
+        return len(unsafe)
+
+    def self_test_unchecked(self) -> None:
+        """Run the self-test for documents indexed before it existed (once, at start-up)."""
+        for doc_id in self.store.unchecked_documents():
+            self.self_test_facts(doc_id)
 
     def exact_answer(self, question: str) -> Answer | None:
         match = self.match_fact(question)
