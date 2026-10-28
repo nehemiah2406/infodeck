@@ -63,7 +63,8 @@ class Answer:
     text: str
     mode: str  # "claude" | "gemini" | "ollama" | "exact" | "sources" | "not_found" | "error"
     passages: list[Passage] = field(default_factory=list)  # shown under "Sources"
-    note: str = ""
+    note: str = ""  # sources mode: why AI answers are off, or the AI error message
+    ai_failed: bool = False  # sources mode because the AI answer failed (busy, timeout, quota...)
     fact: Fact | None = None  # the matched fact ("exact" mode)
     unverified: list[str] = field(default_factory=list)  # numbers in the answer not found in the sources
     loading: str = ""  # documents still being read when the question was asked
@@ -423,8 +424,9 @@ class InfoDeckEngine:
             passages = [p for _, p in sorted(zip(scores, passages), key=lambda x: -x[0])]
         return passages[: self.settings.top_k]
 
-    def sources_answer(self, passages: list[Passage], reason: str = "") -> Answer:
-        return Answer(SOURCES_MODE_NOTE, "sources", passages[:SOURCES_MODE_MAX_PASSAGES], note=reason)
+    def sources_answer(self, passages: list[Passage], reason: str = "", ai_failed: bool = False) -> Answer:
+        return Answer(SOURCES_MODE_NOTE, "sources", passages[:SOURCES_MODE_MAX_PASSAGES], note=reason,
+                      ai_failed=ai_failed)
 
     def stream_llm(self, status: LLMStatus, question: str, passages: list[Passage]) -> Iterator[str]:
         """Yield answer text pieces from the LLM. Raises LLMError with a friendly message."""
@@ -459,5 +461,5 @@ class InfoDeckEngine:
         try:
             text = "".join(self.stream_llm(status, question, passages))
         except LLMError as e:
-            return self.sources_answer(passages, str(e))
+            return self.sources_answer(passages, str(e), ai_failed=True)
         return self.finish_llm_answer(status, text, passages, question)

@@ -20,12 +20,13 @@ from infodeck.embeddings import CrossEncoderReranker, SentenceTransformerEmbedde
 from infodeck.engine import Answer, InfoDeckEngine  # noqa: E402
 from infodeck.llm import LLMError, resolve_llm  # noqa: E402
 from infodeck.preview import can_preview, page_preview  # noqa: E402
-from infodeck.prompts import NOT_FOUND, SOURCES_MODE_NOTE  # noqa: E402
+from infodeck.prompts import NOT_FOUND  # noqa: E402
 from infodeck.store import Passage, VectorStore  # noqa: E402
 from infodeck.ui import (AI_MODES, Trace, card_head_html, cited_html, confidence, copy_button_html,  # noqa: E402
                          copy_label, copy_text, esc, exact_html, follow_ups, has_numbers, is_quota,
                          not_found_html, preview_skeleton_html, skeleton_html, snippet, source_cards_html,
-                         source_line_html, tag_html, topbar_html, trail_html, trail_steps, unique_sources)
+                         source_line_html, sources_reason, sources_tag, tag_html, topbar_html, trail_html,
+                         trail_steps, unique_sources)
 
 log = logging.getLogger("infodeck.app")
 
@@ -189,7 +190,7 @@ def render_ai(ans: Answer, idx: int, level: str, trace: Trace) -> None:
 
 
 def render_sources(ans: Answer, idx: int, level: str, trace: Trace) -> None:
-    tag = "Quota used up" if is_quota(ans.note) else "AI off"
+    tag = sources_tag(ans)
     best = ans.passages[0]
     body, line = snippet(best.text, trace.question)
     with st.container(key=f"idcard_off_{idx}"):
@@ -197,8 +198,7 @@ def render_sources(ans: Answer, idx: int, level: str, trace: Trace) -> None:
         st.markdown(f"{source_line_html(best)}<div class='id-snippet'>{body}</div>", unsafe_allow_html=True)
         with st.expander(f"All passages ({len(ans.passages)}, full text)"):
             render_passages(ans.passages)
-        reason = SOURCES_MODE_NOTE + (f" {ans.note}" if ans.note else "")
-        st.markdown(f"<div class='id-reason'>{esc(reason)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='id-reason'>{esc(sources_reason(ans))}</div>", unsafe_allow_html=True)
         action_row(ans, idx, best, line, passages=False)
 
 
@@ -349,13 +349,16 @@ def _answer_question(engine: InfoDeckEngine, question: str, skeleton, trace: Tra
             errors.append(str(e))
 
     live = st.empty()
-    with live.container():
-        with st.container(key="idcard_live"):
-            st.markdown(card_head_html([tag_html("AI answer", "ai")], None), unsafe_allow_html=True)
-            text = st.write_stream(stream())
-    live.empty()  # replaced by the final, formatted answer card
+    try:
+        with live.container():
+            with st.container(key="idcard_live"):
+                st.markdown(card_head_html([tag_html("AI answer", "ai")], None), unsafe_allow_html=True)
+                text = st.write_stream(stream())
+    finally:  # whatever happened, the loading card and live text make way for the final card
+        skeleton.empty()
+        live.empty()
     if errors:
-        return engine.sources_answer(passages, f"AI answer failed: {errors[0]}")
+        return engine.sources_answer(passages, errors[0], ai_failed=True)
     return engine.finish_llm_answer(status, text if isinstance(text, str) else "".join(text), passages, question)
 
 

@@ -31,6 +31,7 @@ class Settings:
     claude_effort: str = "low"
     gemini_api_key: str = field(default="", repr=False)
     gemini_model: str = "gemini-3.8-flash"
+    gemini_timeout_seconds: float = 30.0  # one Gemini request: no new data for this long = give up
     parser: str = "local"  # "local" (pdfplumber + local OCR) or "gemini" (page images read by Gemini)
     ocr_workers: int = 6  # scanned pages OCR'd in parallel (worker processes); 1 = no extra processes
     ocr_dpi: int = 200  # page image resolution for local OCR (150 lost accuracy in the evaluation)
@@ -69,6 +70,7 @@ def get_settings() -> Settings:
         claude_effort=get("CLAUDE_EFFORT", "low"),
         gemini_api_key=get("GEMINI_API_KEY", ""),
         gemini_model=get("GEMINI_MODEL", "gemini-3.8-flash"),
+        gemini_timeout_seconds=float(get("GEMINI_TIMEOUT_SECONDS", "30")),
         parser=get("PARSER", "local").lower(),
         ocr_workers=max(1, int(get("OCR_WORKERS", "6"))),
         ocr_dpi=int(get("OCR_DPI", "200")),

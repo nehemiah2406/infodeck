@@ -10,5 +10,5 @@ testpaths = ["tests"]
 # no:faulthandler - ChromaDB's native code raises (and handles) Windows exceptions that the
 # faulthandler plugin would print as scary "access violation" noise.
 addopts = "-q -m 'not slow' -p no:faulthandler"
-markers = ["slow: uses the real embedding model (run with: pytest -m slow)"]
+markers = ["slow: takes long - the real embedding model, or the real 45 s Gemini wait (run with: pytest -m slow)"]
 filterwarnings = ["ignore::DeprecationWarning"]

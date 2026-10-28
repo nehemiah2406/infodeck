@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from .engine import BRACKETS_RE, NUMBER_RE, Answer
 from .facts import QUESTION_STOPWORDS, Fact
-from .prompts import NOT_FOUND
+from .prompts import NOT_FOUND, SOURCES_MODE_NOTE
 from .store import Passage
 
 # Citations written by the LLM, e.g. [KRT_Leave_Policy.pdf, p.2] or [a.pdf, p.1; b.pdf, p.3]
@@ -82,8 +82,7 @@ def trail_steps(ans: Answer, trace: Trace) -> list[tuple[str, str]]:
         return [searched, (f"Read {plural(len(trace.retrieved), 'passage')}", "ok"),
                 (f"{AI_MODES[ans.mode]} wrote answer", "ok"), checked]
     if ans.mode == "sources":
-        why = "Quota used up" if is_quota(ans.note) else "AI answer failed" if ans.note.startswith("AI answer failed") \
-            else "AI off"
+        why = sources_tag(ans)
         # The passages shown (sources mode shows the best few), so the count matches "All passages (N)"
         return [searched, (f"Found {plural(len(ans.passages), 'passage')}", "ok"), (why, "warn")]
     if ans.mode == "not_found":
@@ -99,6 +98,18 @@ def trail_html(steps: list[tuple[str, str]], seconds: float) -> str:
 
 def is_quota(note: str) -> bool:
     return "quota" in note.lower()
+
+
+def sources_tag(ans: Answer) -> str:
+    """Label of a sources-mode card: why there is no AI answer."""
+    return "Quota used up" if is_quota(ans.note) else "AI answer failed" if ans.ai_failed else "AI off"
+
+
+def sources_reason(ans: Answer) -> str:
+    """The message under a sources-mode card."""
+    if ans.ai_failed:  # e.g. "Gemini is busy right now. Showing the matching passages instead. ..."
+        return f"AI answer failed: {ans.note}"
+    return SOURCES_MODE_NOTE + (f" {ans.note}" if ans.note else "")
 
 
 def tag_html(text: str, tone: str) -> str:
