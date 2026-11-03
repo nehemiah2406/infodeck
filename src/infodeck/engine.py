@@ -8,6 +8,8 @@ Answer flow for a question:
   4. If no LLM is available: "sources mode", return the best matching passages.
   5. Otherwise stream an answer from the LLM, grounded in the retrieved chunks, then
      flag any number in the answer that does not appear in those chunks.
+     Gemini / Groq (BackupChain): the whole answer is checked first and only shown if every
+     number is in the chunks and it cites a source; else the passages are shown.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from .embeddings import Reranker
 from .facts import Fact, FactExtractor, extract_facts, format_fact_answer, match_quality, symbol_in_question
 from .gemini_parser import ParseError
 from .jobs import IngestJob, IngestQueue, JobCancelled
-from .llm import LLMError, LLMStatus
+from .llm import PROVIDER_NAMES, BackupChain, LLMError, LLMStatus
 from .loaders import (HEADER_SAMPLE_PAGES, MIN_CHARS_PER_PAGE, SUPPORTED_EXTENSIONS, Page, Progress,
                       UnsupportedFileError, iter_pdf_pages, pdf_warnings, repeated_lines, strip_lines)
 from .parsing import NUMBER_CHECK, is_partial, pages_to_recheck, parse_document, read_meta, write_meta
@@ -41,6 +43,8 @@ COMMIT_EVERY_PAGES = 5  # while a big PDF loads, finished pages become searchabl
 FACT_CANDIDATES = 10  # facts with a similar name looked at per question (all must agree on the value)
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 BRACKETS_RE = re.compile(r"\[[^\[\]]*\]")  # citations like [file.pdf, p.3]
+# A Gemini / Groq answer that fails the source check is not shown; the passages are, with this note.
+AI_UNCHECKED = "The AI answer did not pass the source check, showing the matching passages."
 
 
 @dataclass
@@ -68,6 +72,7 @@ class Answer:
     fact: Fact | None = None  # the matched fact ("exact" mode)
     unverified: list[str] = field(default_factory=list)  # numbers in the answer not found in the sources
     loading: str = ""  # documents still being read when the question was asked
+    answered_by: str = ""  # "Gemini" | "Groq" (backup chain answers only)
 
 
 def safe_file_name(name: str) -> str:
@@ -100,6 +105,24 @@ def unverified_numbers(answer: str, passages: list[Passage], question: str = "")
             continue
         missing.append(n)
     return missing
+
+
+def cites_a_source(answer: str, passages: list[Passage]) -> bool:
+    """True if the answer names at least one passage label ('file, p.N'), spaces ignored."""
+    squash = lambda s: re.sub(r"\s+", "", s).lower()  # noqa: E731
+    text = squash(answer)
+    return any(squash(p.label) in text for p in passages)
+
+
+def answer_problems(answer: str, passages: list[Passage], question: str = "") -> list[str]:
+    """Why an AI answer must not be shown (empty list: it passes the source check)."""
+    problems = []
+    missing = unverified_numbers(answer, passages, question)
+    if missing:
+        problems.append(f"{len(missing)} number(s) not in the passages")
+    if not cites_a_source(answer, passages):
+        problems.append("no source cited")
+    return problems
 
 
 class InfoDeckEngine:
@@ -477,6 +500,20 @@ class InfoDeckEngine:
         return Answer(text.strip(), status.mode, cited_passages(text, passages),
                       unverified=unverified_numbers(text, passages, question))
 
+    def chain_answer(self, status: LLMStatus, question: str, passages: list[Passage]) -> Answer:
+        """Gemini / Groq (BackupChain): the whole answer, shown only if it passes the source check.
+        Raises LLMError (busy, failed) like stream_llm."""
+        text, provider = status.llm.answer(SYSTEM_PROMPT, build_user_prompt(question, passages))
+        if is_not_found(text):
+            return Answer(NOT_FOUND, "not_found")
+        problems = answer_problems(text, passages, question)
+        if problems:
+            log.warning("%s answer not shown, it failed the source check: %s",
+                        PROVIDER_NAMES[provider], "; ".join(problems))
+            return self.sources_answer(passages, AI_UNCHECKED, ai_failed=True)
+        return Answer(text.strip(), provider, cited_passages(text, passages),
+                      answered_by=PROVIDER_NAMES[provider])
+
     def answer(self, question: str, status: LLMStatus) -> Answer:
         """Non-streaming answer (used by scripts and tests)."""
         question = question.strip()
@@ -497,6 +534,8 @@ class InfoDeckEngine:
         if status.llm is None:
             return self.sources_answer(passages, status.reason)
         try:
+            if isinstance(status.llm, BackupChain):
+                return self.chain_answer(status, question, passages)
             text = "".join(self.stream_llm(status, question, passages))
         except LLMError as e:
             return self.sources_answer(passages, str(e), ai_failed=True)

@@ -1,5 +1,5 @@
 """Gemini must never hang the app: slow, stuck or busy Gemini -> the sources card with a clear
-message within ~15 s (GEMINI_MAX_WAIT_SECONDS). Fake Gemini clients only: the real Gemini API
+message within ~5 s (GEMINI_MAX_WAIT_SECONDS). Fake Gemini clients only: the real Gemini API
 is never called."""
 
 from __future__ import annotations
@@ -75,12 +75,12 @@ def test_timeout_settings_have_safe_defaults_and_can_be_changed(tmp_path, monkey
     monkeypatch.delenv("GEMINI_MAX_WAIT_SECONDS", raising=False)
     env.write_text("", encoding="utf-8")
     s = config.get_settings()
-    assert (s.gemini_timeout_seconds, s.gemini_max_wait_seconds) == (15, 15)
+    assert (s.gemini_timeout_seconds, s.gemini_max_wait_seconds) == (15, 5)
     env.write_text("GEMINI_TIMEOUT_SECONDS=12\nGEMINI_MAX_WAIT_SECONDS=20\n", encoding="utf-8")
     s = config.get_settings()
     assert (s.gemini_timeout_seconds, s.gemini_max_wait_seconds) == (12, 20)
     example = (config.ROOT / ".env.example").read_text(encoding="utf-8")
-    assert "GEMINI_TIMEOUT_SECONDS=15" in example and "GEMINI_MAX_WAIT_SECONDS=15" in example
+    assert "GEMINI_TIMEOUT_SECONDS=15" in example and "GEMINI_MAX_WAIT_SECONDS=5" in example
 
 
 def test_gemini_client_gets_a_request_timeout_and_short_retries():
@@ -95,7 +95,7 @@ def test_gemini_client_gets_a_request_timeout_and_short_retries():
 def test_settings_reach_the_gemini_client():
     s = replace(Settings(), llm_provider="gemini", gemini_api_key=FAKE_KEY,
                 gemini_timeout_seconds=12, gemini_max_wait_seconds=20)
-    llm = resolve_llm(s).llm
+    llm = resolve_llm(s).llm.gemini  # inside the Gemini / Groq backup chain
     assert (llm.timeout, llm.max_wait) == (12, 20)
     assert llm._client._api_client._http_options.timeout == 12_000
 
@@ -195,7 +195,7 @@ def run_app_with_stuck_gemini(tmp_path: Path, monkeypatch, max_wait: float | Non
 
     env = tmp_path / ".env"
     env.write_text("\n".join([
-        "LLM_PROVIDER=gemini", f"GEMINI_API_KEY={FAKE_KEY}", "RERANK_MODEL=none", "MIN_SCORE=0.25",
+        "LLM_PROVIDER=gemini", f"GEMINI_API_KEY={FAKE_KEY}", "GROQ_API_KEY=", "RERANK_MODEL=none", "MIN_SCORE=0.25",
         f"CHROMA_DIR={tmp_path / 'chroma'}", f"PARSED_DIR={tmp_path / 'parsed'}",
         f"UPLOAD_DIR={tmp_path / 'uploads'}", f"SAMPLE_DIR={tmp_path / 'no_samples'}"]
         + ([f"GEMINI_MAX_WAIT_SECONDS={max_wait}"] if max_wait is not None else [])), encoding="utf-8")
@@ -247,8 +247,8 @@ def test_app_shows_sources_card_and_no_skeleton_when_gemini_is_stuck(tmp_path, m
 
 
 @pytest.mark.slow
-def test_app_shows_sources_card_in_about_15_seconds_with_the_default_limit(tmp_path, monkeypatch):
+def test_app_shows_sources_card_in_about_5_seconds_with_the_default_limit(tmp_path, monkeypatch):
     at, seconds = run_app_with_stuck_gemini(tmp_path, monkeypatch, max_wait=None)
     check_sources_card(at)
     print(f"sources card shown after {seconds:.1f} s")
-    assert 15 <= seconds < 20  # waited the full default 15 s, then the card came quickly
+    assert 5 <= seconds < 10  # waited the full default 5 s, then the card came quickly

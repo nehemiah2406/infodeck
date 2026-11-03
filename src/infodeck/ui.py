@@ -18,7 +18,7 @@ from .store import Passage
 
 # Citations written by the LLM, e.g. [KRT_Leave_Policy.pdf, p.2] or [a.pdf, p.1; b.pdf, p.3]
 CITATION_RE = re.compile(r"\[([^\[\]]+?\.(?:pdf|docx|txt|xlsx|csv|pptx|png|jpe?g)\b[^\[\]]*)\]", re.IGNORECASE)
-AI_MODES = {"claude": "Claude", "gemini": "Gemini", "ollama": "Ollama"}
+AI_MODES = {"claude": "Claude", "gemini": "Gemini", "groq": "Groq", "ollama": "Ollama"}
 EXACT_HIGH_MARGIN = 0.10  # exact value: High if the match score is this far above FACT_MATCH_SCORE
 # Passages: High / Medium if the best score is this far above MIN_SCORE. Measured with bge-small on
 # the sample docs: clear matches score 0.70-0.79, off-topic questions that still pass MIN_SCORE 0.58-0.59.
@@ -110,6 +110,11 @@ def sources_reason(ans: Answer) -> str:
     if ans.ai_failed:  # e.g. "Gemini is busy right now. Showing the matching passages instead. ..."
         return f"AI answer failed: {ans.note}"
     return SOURCES_MODE_NOTE + (f" {ans.note}" if ans.note else "")
+
+
+def answered_by_html(ans: Answer) -> str:
+    """Small text on the AI card: which AI wrote the answer (Gemini / Groq backup chain only)."""
+    return f"<div class='id-reason'>Answered by {esc(ans.answered_by)}</div>" if ans.answered_by else ""
 
 
 def tag_html(text: str, tone: str) -> str:

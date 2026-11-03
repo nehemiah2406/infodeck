@@ -18,11 +18,12 @@ from infodeck import APP_NAME  # noqa: E402
 from infodeck.config import get_settings, setup_logging  # noqa: E402
 from infodeck.embeddings import CrossEncoderReranker, SentenceTransformerEmbedder  # noqa: E402
 from infodeck.engine import Answer, InfoDeckEngine  # noqa: E402
-from infodeck.llm import LLMError, resolve_llm  # noqa: E402
+from infodeck.llm import BackupChain, LLMError, resolve_llm  # noqa: E402
 from infodeck.preview import can_preview, page_preview  # noqa: E402
 from infodeck.prompts import NOT_FOUND  # noqa: E402
 from infodeck.store import Passage, VectorStore  # noqa: E402
-from infodeck.ui import (AI_MODES, Trace, card_head_html, cited_html, confidence, copy_button_html,  # noqa: E402
+from infodeck.ui import (AI_MODES, Trace, answered_by_html, card_head_html, cited_html, confidence,  # noqa: E402
+                         copy_button_html,
                          copy_label, copy_text, esc, exact_html, follow_ups, has_numbers, is_quota,
                          not_found_html, preview_skeleton_html, skeleton_html, snippet, source_cards_html,
                          source_line_html, sources_reason, sources_tag, tag_html, topbar_html, trail_html,
@@ -174,6 +175,8 @@ def render_ai(ans: Answer, idx: int, level: str, trace: Trace) -> None:
     with st.container(key=f"idcard_ai_{idx}"):
         st.markdown(card_head_html(tags, level), unsafe_allow_html=True)
         st.markdown(cited_html(ans.text, sources), unsafe_allow_html=True)
+        if ans.answered_by:
+            st.markdown(answered_by_html(ans), unsafe_allow_html=True)
         if ans.unverified:
             st.markdown(f"<div class='id-unverified'>Not found in the passages: {esc(', '.join(ans.unverified))}. "
                         "Check these in the source.</div>", unsafe_allow_html=True)
@@ -335,6 +338,13 @@ def _answer_question(engine: InfoDeckEngine, question: str, skeleton, trace: Tra
         return Answer(NOT_FOUND, "not_found")
     if status.llm is None:
         return engine.sources_answer(passages, status.reason)
+    if isinstance(status.llm, BackupChain):  # Gemini / Groq: checked first, then shown (no live text)
+        try:
+            return engine.chain_answer(status, question, passages)
+        except LLMError as e:
+            return engine.sources_answer(passages, str(e), ai_failed=True)
+        finally:
+            skeleton.empty()
 
     errors: list[str] = []
 
