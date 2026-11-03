@@ -369,6 +369,8 @@ class InfoDeckEngine:
         for job in self.jobs.active():
             if job.status == "running" and job.total:
                 notes.append(f"{job.file_name} is still loading (page {job.done} of {job.total})")
+            elif job.status == "running":  # started; the page count comes with the first page
+                notes.append(f"{job.file_name} is being read")
             else:
                 notes.append(f"{job.file_name} is waiting to be read")
         if not notes:

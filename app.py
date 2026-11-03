@@ -1,6 +1,11 @@
 """InfoDeck - ask questions about your company documents.
 
 Run with run.bat, or:  .venv\\Scripts\\python -m streamlit run app.py
+
+Everything that runs the app is inside main(), called only when this file is not run as
+"__mp_main__". Streamlit makes this file the main module, and on Windows every new OCR worker
+process first re-runs the main module under that name: without the guard each worker started
+a whole second InfoDeck (AI models, database, sample documents) before reading a single page.
 """
 
 from __future__ import annotations
@@ -39,11 +44,6 @@ SAMPLE_QUESTIONS = [
     "What should I do if I lose my laptop?",
 ]
 
-st.set_page_config(page_title=APP_NAME, page_icon="📘", layout="centered",
-                   initial_sidebar_state="expanded", menu_items={})
-st.markdown(f"<style>{(Path(__file__).parent / 'app.css').read_text(encoding='utf-8')}</style>",
-            unsafe_allow_html=True)
-
 
 # --------------------------------------------------------------------------- #
 # Engine (shared by all users; created once per server process)
@@ -64,13 +64,13 @@ def get_engine() -> InfoDeckEngine:
 # --------------------------------------------------------------------------- #
 # The answer card: answer line, file + page, exact quote, Copy
 # --------------------------------------------------------------------------- #
-def render_answer(ans: Answer, trace: Trace, idx: int) -> CardView:
+def render_answer(ans: Answer, trace: Trace, idx: int, still_loading: bool) -> CardView:
     view = card_view(ans, trace.question, get_settings().min_score)
     with st.container(key=f"idcard_{view.kind}_{idx}"):
         st.markdown(card_html(view), unsafe_allow_html=True)
         if view.copy_text:
             st.html(copy_button_html("Copy", view.copy_text), width="content", unsafe_allow_javascript=True)
-    if ans.loading:
+    if ans.loading and still_loading:  # once the documents are read, the old note would be wrong
         st.caption(f"⏳ {ans.loading}")
     return view
 
@@ -86,6 +86,8 @@ def upload_errors(r) -> list[str]:
 def job_text(job) -> str:
     if job.status == "running" and job.total:
         return f"Reading {job.file_name}: page {job.done} of {job.total}"
+    if job.status == "running":  # started; the page count comes with the first page
+        return f"Reading {job.file_name}..."
     return f"Waiting: {job.file_name} (files are read one at a time)"
 
 
@@ -213,95 +215,103 @@ def _answer_question(engine: InfoDeckEngine, question: str, skeleton, trace: Tra
 
 
 # --------------------------------------------------------------------------- #
-# Start-up
+# The page
 # --------------------------------------------------------------------------- #
-try:
-    with st.spinner("Starting InfoDeck... (the first start can take up to a minute)"):
-        engine = get_engine()
-except Exception:
-    log.exception("Start-up failed")
-    st.error("InfoDeck could not start. Please check the terminal window for details and try again.")
-    st.stop()
+def main() -> None:
+    global ss, docs  # used by the helpers above
+    st.set_page_config(page_title=APP_NAME, page_icon="📘", layout="centered",
+                       initial_sidebar_state="expanded", menu_items={})
+    st.markdown(f"<style>{(Path(__file__).parent / 'app.css').read_text(encoding='utf-8')}</style>",
+                unsafe_allow_html=True)
+    try:
+        with st.spinner("Starting InfoDeck... (the first start can take up to a minute)"):
+            engine = get_engine()
+    except Exception:
+        log.exception("Start-up failed")
+        st.error("InfoDeck could not start. Please check the terminal window for details and try again.")
+        st.stop()
 
-ss = st.session_state
-ss.setdefault("messages", [])
-ss.setdefault("uploader_key", 0)
-ss.setdefault("upload_errors", [])  # shown in the sidebar until the next question
-ss.setdefault("watch", set())  # documents this browser tab uploaded that are still being read
+    ss = st.session_state
+    ss.setdefault("messages", [])
+    ss.setdefault("uploader_key", 0)
+    ss.setdefault("upload_errors", [])  # shown in the sidebar until the next question
+    ss.setdefault("watch", set())  # documents this browser tab uploaded that are still being read
 
-st.markdown(topbar_html(APP_NAME), unsafe_allow_html=True)
+    st.markdown(topbar_html(APP_NAME), unsafe_allow_html=True)
 
-# --------------------------------------------------------------------------- #
-# Sidebar: logo, Upload, file types (+ progress and errors while uploading)
-# --------------------------------------------------------------------------- #
-with st.sidebar:
-    st.markdown(f"<div class='id-brand'>{APP_NAME}</div>", unsafe_allow_html=True)
-    files = st.file_uploader("Upload", type=UPLOAD_TYPES, accept_multiple_files=True,
-                             key=f"uploader_{ss.uploader_key}", label_visibility="collapsed")
-    st.markdown(f"<div class='id-types'>{UPLOAD_HINT}</div>", unsafe_allow_html=True)
-    if files:
-        ss.upload_errors = ingest_files(engine, files)
-        ss.uploader_key += 1  # clears the upload box
+    # Sidebar: logo, Upload, file types (+ progress and errors while uploading)
+    with st.sidebar:
+        st.markdown(f"<div class='id-brand'>{APP_NAME}</div>", unsafe_allow_html=True)
+        files = st.file_uploader("Upload", type=UPLOAD_TYPES, accept_multiple_files=True,
+                                 key=f"uploader_{ss.uploader_key}", label_visibility="collapsed")
+        st.markdown(f"<div class='id-types'>{UPLOAD_HINT}</div>", unsafe_allow_html=True)
+        if files:
+            ss.upload_errors = ingest_files(engine, files)
+            ss.uploader_key += 1  # clears the upload box
+            st.rerun()
+        for msg in ss.upload_errors:
+            st.error(msg)
+        loading_panel(engine)
+
+    docs = engine.store.list_documents()
+    still_loading = bool(engine.jobs.active())
+
+    # Main area: chat
+    welcome = st.empty()  # headline + example questions, only while the chat is empty
+    with welcome.container():
+        if not ss.messages:
+            st.markdown(f"<div class='id-hero'><div class='id-headline'>{HEADLINE}</div>"
+                        f"<div class='id-tagline'>{TAGLINE}</div></div>", unsafe_allow_html=True)
+        if not docs:
+            st.info("Click + in the chat box (or Upload in the sidebar) to add a PDF, Word, Excel, PowerPoint, "
+                    "text or image file.")
+        elif not ss.messages and any(d.file_name.startswith("KRT_") for d in docs):
+            with st.container(key="samples", horizontal=True):
+                for q in SAMPLE_QUESTIONS:
+                    if st.button(q, key=f"sample_{q}"):
+                        ss.pending_question = q
+                        st.rerun()
+
+    for i, m in enumerate(ss.messages):
+        with st.chat_message(m["role"]):
+            if m["role"] == "user":
+                st.markdown(esc(m["content"]), unsafe_allow_html=True)
+            else:
+                render_answer(m["answer"], m.get("trace") or Trace(), i, still_loading)
+
+    typed = st.chat_input("Ask a question or attach a document...", accept_file="multiple",
+                          file_type=UPLOAD_TYPES)
+    if typed and typed.files:
+        # Index the attached files first; a question typed with them is answered on the next run.
+        ss.upload_errors = ingest_files(engine, typed.files)
+        if typed.text.strip():
+            ss.pending_question = typed.text.strip()
         st.rerun()
-    for msg in ss.upload_errors:
-        st.error(msg)
-    loading_panel(engine)
 
-docs = engine.store.list_documents()
+    question = ((typed.text if typed else "") or ss.pop("pending_question", "") or "").strip()
+    if question and not docs and not engine.jobs.active():
+        st.warning("Please add a document first (use the + button).")
+    elif question:
+        welcome.empty()
+        ss.upload_errors = []  # upload errors are only shown while uploading
+        ss.messages.append({"role": "user", "content": question})
+        with st.chat_message("user"):
+            st.markdown(esc(question), unsafe_allow_html=True)
+        with st.chat_message("assistant"):
+            skeleton = st.empty()
+            skeleton.markdown(skeleton_html(), unsafe_allow_html=True)
+            try:
+                ans, trace = answer_question(engine, question, skeleton)
+            except Exception:
+                log.exception("Answering failed")
+                ans = Answer("Sorry, something went wrong while answering. Please try again.", "error")
+                trace = Trace(question=question)
+            skeleton.empty()
+            view = render_answer(ans, trace, len(ss.messages), bool(ans.loading))
+        ss.messages.append({"role": "assistant", "answer": ans, "trace": trace})
+        log_answer(get_settings().qa_log_file, question, view, trace.seconds)
 
-# --------------------------------------------------------------------------- #
-# Main area: chat
-# --------------------------------------------------------------------------- #
-welcome = st.empty()  # headline + example questions, only while the chat is empty
-with welcome.container():
-    if not ss.messages:
-        st.markdown(f"<div class='id-hero'><div class='id-headline'>{HEADLINE}</div>"
-                    f"<div class='id-tagline'>{TAGLINE}</div></div>", unsafe_allow_html=True)
-    if not docs:
-        st.info("Click + in the chat box (or Upload in the sidebar) to add a PDF, Word, Excel, PowerPoint, "
-                "text or image file.")
-    elif not ss.messages and any(d.file_name.startswith("KRT_") for d in docs):
-        with st.container(key="samples", horizontal=True):
-            for q in SAMPLE_QUESTIONS:
-                if st.button(q, key=f"sample_{q}"):
-                    ss.pending_question = q
-                    st.rerun()
 
-for i, m in enumerate(ss.messages):
-    with st.chat_message(m["role"]):
-        if m["role"] == "user":
-            st.markdown(esc(m["content"]), unsafe_allow_html=True)
-        else:
-            render_answer(m["answer"], m.get("trace") or Trace(), i)
-
-typed = st.chat_input("Ask a question or attach a document...", accept_file="multiple",
-                      file_type=UPLOAD_TYPES)
-if typed and typed.files:
-    # Index the attached files first; a question typed with them is answered on the next run.
-    ss.upload_errors = ingest_files(engine, typed.files)
-    if typed.text.strip():
-        ss.pending_question = typed.text.strip()
-    st.rerun()
-
-question = ((typed.text if typed else "") or ss.pop("pending_question", "") or "").strip()
-if question and not docs and not engine.jobs.active():
-    st.warning("Please add a document first (use the + button).")
-elif question:
-    welcome.empty()
-    ss.upload_errors = []  # upload errors are only shown while uploading
-    ss.messages.append({"role": "user", "content": question})
-    with st.chat_message("user"):
-        st.markdown(esc(question), unsafe_allow_html=True)
-    with st.chat_message("assistant"):
-        skeleton = st.empty()
-        skeleton.markdown(skeleton_html(), unsafe_allow_html=True)
-        try:
-            ans, trace = answer_question(engine, question, skeleton)
-        except Exception:
-            log.exception("Answering failed")
-            ans = Answer("Sorry, something went wrong while answering. Please try again.", "error")
-            trace = Trace(question=question)
-        skeleton.empty()
-        view = render_answer(ans, trace, len(ss.messages))
-    ss.messages.append({"role": "assistant", "answer": ans, "trace": trace})
-    log_answer(get_settings().qa_log_file, question, view, trace.seconds)
+# An OCR worker process re-runs this file as "__mp_main__" (Windows "spawn"): it must not start the app.
+if __name__ != "__mp_main__":
+    main()
