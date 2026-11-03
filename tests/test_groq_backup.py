@@ -4,6 +4,7 @@ Fake Gemini and Groq clients only: no real API is ever called."""
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from infodeck.config import SecretRedactingFilter, Settings
 from infodeck.engine import AI_UNCHECKED, cites_a_source
 from infodeck.llm import (AI_BUSY, GEMINI_BUSY, GROQ_BUSY, GROQ_URL, BackupChain, GeminiLLM, GroqLLM, LLMError,
                           LLMStatus, resolve_llm)
-from infodeck.ui import answered_by_html, sources_reason, trail_steps, Trace
+from infodeck.ui import card_html, card_view
 from tests.test_gemini_timeout import DOC, FAKE_KEY, QUESTION, FailingGemini, HangingGemini, server_error
 
 GROQ_KEY = "gsk_THIS-IS-A-FAKE-GROQ-KEY-0123456789"
@@ -72,17 +73,29 @@ def test_gemini_timeout_then_groq_answers_within_the_budget(bolts, caplog):
     caplog.set_level("INFO", logger="infodeck.llm")
     stuck = HangingGemini()
     groq = FakeGroq(f"The bolts are tightened to 540 N·m in a cross pattern [{label(bolts)}].")
-    start = time.monotonic()
+    status = chain(stuck, groq, first=0.5, budget=3.0)
+    seconds = []
+    real_answer = status.llm.answer
+
+    def timed(system, user):  # time the AI part only: a busy laptop can make the search itself slow
+        start = time.monotonic()
+        try:
+            return real_answer(system, user)
+        finally:
+            seconds.append(time.monotonic() - start)
+
+    status.llm.answer = timed
     try:
-        ans = bolts.answer(QUESTION, chain(stuck, groq, first=0.5, budget=3.0))
+        ans = bolts.answer(QUESTION, status)
     finally:
         stuck.release.set()
-    seconds = time.monotonic() - start
     assert ans.mode == "groq" and ans.answered_by == "Groq" and "540 N·m" in ans.text
     assert ans.passages and ans.passages[0].file_name == "bolts.txt"
-    assert seconds < 3.0
+    assert seconds[0] < 3.0
     assert 1.5 < groq.calls[0]["timeout"] < 2.6  # Groq got the time left of the 3 s budget (~2.5 s)
-    assert "Gemini failed after 0.5 s" in caplog.text and "Groq answered in" in caplog.text
+    # Gemini's own clock starts a moment after the chain's, so its log shows 0.4-0.5 s
+    assert re.search(r"Gemini failed after 0\.[45] s: no reply within", caplog.text)
+    assert "Groq answered in" in caplog.text
 
 
 def test_gemini_503_and_halfway_stops_go_to_groq(bolts):
@@ -102,8 +115,8 @@ def test_healthy_gemini_answers_and_groq_is_never_called(bolts):
     groq = FakeGroq("never used")
     ans = bolts.answer(QUESTION, chain(gemini, groq))
     assert ans.mode == "gemini" and ans.answered_by == "Gemini" and groq.calls == []
-    assert answered_by_html(ans) == "<div class='id-reason'>Answered by Gemini</div>"
-    assert ("Gemini wrote answer", "ok") in trail_steps(ans, Trace(retrieved=ans.passages))
+    html = card_html(card_view(ans, QUESTION, 0.55))
+    assert "540" in html and "Answered by" not in html and "Gemini" not in html  # the card does not say who
 
 
 def test_gemini_answer_that_takes_longer_than_the_budget_is_stopped():
@@ -128,7 +141,7 @@ def test_both_fail_shows_the_passages_with_the_busy_note(bolts):
     ans = bolts.answer(QUESTION, chain(FailingGemini(server_error(503)), FakeGroq(status=503)))
     assert ans.mode == "sources" and ans.ai_failed and ans.passages[0].file_name == "bolts.txt"
     assert ans.note == AI_BUSY == "AI is busy, showing the matching passages."
-    assert sources_reason(ans) == f"AI answer failed: {AI_BUSY}"
+    assert "busy" not in card_html(card_view(ans, QUESTION, 0.25))  # the card shows the passage, no message
 
 
 def test_groq_timeout_and_no_time_left_also_give_passages(bolts):

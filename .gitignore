@@ -23,6 +23,8 @@ data/eval/
 # ---- Generated data ----
 # ChromaDB vector store (persistent folder)
 storage/
+# Q&A log (src/infodeck/qa_log.py): questions and document quotes, NEVER commit
+logs/
 chroma_db/
 *.sqlite3
 eval_results/

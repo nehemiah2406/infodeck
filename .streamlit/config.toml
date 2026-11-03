@@ -17,8 +17,10 @@ toolbarMode = "minimal"
 showErrorDetails = "none"
 
 [theme]
-base = "dark"
-primaryColor = "#ff7a45"
-backgroundColor = "#050507"
-secondaryBackgroundColor = "#0e0e12"
-textColor = "#ededef"
+base = "light"
+primaryColor = "#7a1f2b"
+backgroundColor = "#f4ede1"
+secondaryBackgroundColor = "#ebe1d0"
+textColor = "#2a1a1c"
+# Lato for all text (Playfair Display for the logo and answer line comes from app.css)
+font = "Lato:https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap, sans-serif"

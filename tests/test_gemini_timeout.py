@@ -1,5 +1,5 @@
-"""Gemini must never hang the app: slow, stuck or busy Gemini -> the sources card with a clear
-message within ~5 s (GEMINI_MAX_WAIT_SECONDS). Fake Gemini clients only: the real Gemini API
+"""Gemini must never hang the app: slow, stuck or busy Gemini -> the best passage (no message)
+within ~5 s (GEMINI_MAX_WAIT_SECONDS). Fake Gemini clients only: the real Gemini API
 is never called."""
 
 from __future__ import annotations
@@ -17,7 +17,8 @@ import infodeck.config as config
 from infodeck.engine import Answer
 from infodeck.config import Settings
 from infodeck.llm import GEMINI_BUSY, GeminiLLM, LLMError, LLMStatus, resolve_llm
-from infodeck.ui import Trace, skeleton_html, sources_reason, sources_tag, tag_html, trail_steps
+from infodeck.prompts import NOT_FOUND
+from infodeck.ui import QUOTE_LABEL, card_html, card_view, skeleton_html
 from tests.conftest import FakeEmbedder
 
 FAKE_KEY = "AIza-THIS-IS-A-FAKE-GEMINI-KEY-0123456789"
@@ -162,21 +163,20 @@ def test_rate_limit_wait_never_passes_the_time_limit():
 
 
 # ---- what the user sees ---------------------------------------------------------------- #
-def test_503_gives_sources_answer_with_the_message(engine, tmp_path):
+def test_503_gives_the_best_passage_without_any_message(engine, tmp_path):
     (tmp_path / "bolts.txt").write_text(DOC, encoding="utf-8")
     engine.ingest_file(tmp_path / "bolts.txt")
     llm = GeminiLLM(FAKE_KEY, "m", client=FailingGemini(server_error(503)))
     ans = engine.answer(QUESTION, LLMStatus(llm, "gemini", llm.label))
-    assert ans.mode == "sources" and ans.ai_failed and ans.passages
-    assert sources_tag(ans) == "AI answer failed"
-    assert sources_reason(ans) == f"AI answer failed: {GEMINI_BUSY}"
-    assert trail_steps(ans, Trace(retrieved=ans.passages))[-1] == ("AI answer failed", "warn")
+    assert ans.mode == "sources" and ans.ai_failed and ans.passages and ans.note == GEMINI_BUSY  # engine: why
+    strong = card_html(card_view(ans, QUESTION, min_score=0.25))  # the card: the passage, no message
+    assert "bolts.txt" in strong and QUOTE_LABEL in strong
+    assert "busy" not in strong and "failed" not in strong
 
 
-def test_sources_card_text_when_ai_is_simply_off():
+def test_card_says_nothing_about_ai_being_off():
     off = Answer("", "sources", note="No Gemini API key in .env yet.")
-    assert sources_tag(off) == "AI off"
-    assert sources_reason(off) == "AI answers are off, showing matching passages. No Gemini API key in .env yet."
+    assert card_html(card_view(off, QUESTION, 0.55)) == f"<div class='id-nf'>{NOT_FOUND}</div>"
 
 
 # ---- the app itself (Streamlit AppTest, fake engine models, fake Gemini) ----------------- #
@@ -196,6 +196,7 @@ def run_app_with_stuck_gemini(tmp_path: Path, monkeypatch, max_wait: float | Non
     env = tmp_path / ".env"
     env.write_text("\n".join([
         "LLM_PROVIDER=gemini", f"GEMINI_API_KEY={FAKE_KEY}", "GROQ_API_KEY=", "RERANK_MODEL=none", "MIN_SCORE=0.25",
+        f"QA_LOG_FILE={tmp_path / 'logs' / 'qa_log.jsonl'}",
         f"CHROMA_DIR={tmp_path / 'chroma'}", f"PARSED_DIR={tmp_path / 'parsed'}",
         f"UPLOAD_DIR={tmp_path / 'uploads'}", f"SAMPLE_DIR={tmp_path / 'no_samples'}"]
         + ([f"GEMINI_MAX_WAIT_SECONDS={max_wait}"] if max_wait is not None else [])), encoding="utf-8")
@@ -233,17 +234,22 @@ def page_html(at) -> str:
 def check_sources_card(at) -> None:
     assert not at.exception
     html = page_html(at)
-    assert "Gemini is busy right now. Showing the matching passages instead." in html  # the sources card
-    assert "bolts.txt" in html  # with the matching passage
+    assert "bolts.txt" in html and QUOTE_LABEL in html  # the best passage (strong: MIN_SCORE=0.25)
+    assert "540 N·m" in html
+    assert "busy" not in html and "AI answer failed" not in html  # with no message
     assert skeleton_html() not in html  # the loading skeleton is gone
-    assert tag_html("AI answer", "ai") not in html  # and so is the live "AI answer" card
-    assert tag_html("AI answer failed", "warn") in html
 
 
 def test_app_shows_sources_card_and_no_skeleton_when_gemini_is_stuck(tmp_path, monkeypatch):
     at, seconds = run_app_with_stuck_gemini(tmp_path, monkeypatch, max_wait=1.0)
     check_sources_card(at)
     assert seconds < 10
+    import json
+
+    [line] = (tmp_path / "logs" / "qa_log.jsonl").read_text(encoding="utf-8").splitlines()  # the Q&A log
+    record = json.loads(line)
+    assert (record["question"], record["kind"], record["file"]) == (QUESTION, "passage", "bolts.txt")
+    assert FAKE_KEY not in line
 
 
 @pytest.mark.slow

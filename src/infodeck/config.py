@@ -48,6 +48,7 @@ class Settings:
     parsed_dir: Path = ROOT / "storage" / "parsed"  # parsed text per page (also the parse cache)
     upload_dir: Path = ROOT / "data" / "uploads"
     sample_dir: Path = ROOT / "data" / "sample_docs"
+    qa_log_file: Path = ROOT / "logs" / "qa_log.jsonl"  # every question + shown answer (git-ignored)
     top_k: int = 5
     min_score: float = 0.55
     fact_match_score: float = 0.80  # exact-value answers need at least this similarity
@@ -92,6 +93,7 @@ def get_settings() -> Settings:
         parsed_dir=_resolve(get("PARSED_DIR", "storage/parsed")),
         upload_dir=_resolve(get("UPLOAD_DIR", "data/uploads")),
         sample_dir=_resolve(get("SAMPLE_DIR", "data/sample_docs")),
+        qa_log_file=_resolve(get("QA_LOG_FILE", "logs/qa_log.jsonl")),
         top_k=int(get("TOP_K", "5")),
         min_score=float(get("MIN_SCORE", "0.55")),
         fact_match_score=float(get("FACT_MATCH_SCORE", "0.80")),

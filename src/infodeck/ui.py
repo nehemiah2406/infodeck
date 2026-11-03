@@ -1,8 +1,11 @@
-"""HTML pieces for the answer UI (top bar, process trail, answer cards, citations, snippets).
+"""HTML pieces for the answer UI (top bar, the answer card, snippets, Copy button).
 
 Pure functions, so they can be tested without Streamlit. Every piece of document or
-answer text goes through esc() (or _highlight, which escapes too): numbers, units and
-quotes are shown exactly as they are in the Answer, never changed.
+answer text goes through esc() (or _highlight / _key_numbers, which escape too): numbers,
+units and quotes are shown exactly as they are in the Answer, never changed.
+
+Every answer uses one card, in this order: the answer line (key value in maroon), file name +
+page, "Exact text from the document" with the quote, and a Copy button. Nothing else.
 """
 
 from __future__ import annotations
@@ -11,28 +14,24 @@ import html
 import re
 from dataclasses import dataclass, field
 
-from .engine import BRACKETS_RE, NUMBER_RE, Answer
+from .engine import NUMBER_RE, Answer
 from .facts import QUESTION_STOPWORDS, Fact
-from .prompts import NOT_FOUND, SOURCES_MODE_NOTE
+from .prompts import NOT_FOUND
 from .store import Passage
 
-# Citations written by the LLM, e.g. [KRT_Leave_Policy.pdf, p.2] or [a.pdf, p.1; b.pdf, p.3]
-CITATION_RE = re.compile(r"\[([^\[\]]+?\.(?:pdf|docx|txt|xlsx|csv|pptx|png|jpe?g)\b[^\[\]]*)\]", re.IGNORECASE)
+# Citations written by the LLM, e.g. [KRT_Leave_Policy.pdf, p.2], [a.pdf, p.1; b.pdf, p.3] or, from some
+# models, with full-width brackets: 【KRT_Leave_Policy.pdf, p.2】
+CITATION_RE = re.compile(r"[\[【]([^\[\]【】]+?\.(?:pdf|docx|txt|xlsx|csv|pptx|png|jpe?g)\b[^\[\]【】]*)[\]】]",
+                         re.IGNORECASE)
 AI_MODES = {"claude": "Claude", "gemini": "Gemini", "groq": "Groq", "ollama": "Ollama"}
 EXACT_HIGH_MARGIN = 0.10  # exact value: High if the match score is this far above FACT_MATCH_SCORE
 # Passages: High / Medium if the best score is this far above MIN_SCORE. Measured with bge-small on
 # the sample docs: clear matches score 0.70-0.79, off-topic questions that still pass MIN_SCORE 0.58-0.59.
 PASSAGE_HIGH_MARGIN = 0.15
 PASSAGE_MEDIUM_MARGIN = 0.05
+QUOTE_LABEL = "Exact text from the document"
 SNIPPET_LINES = 3
 LONG_LINE = 300  # a "line" longer than this is split into sentences for the snippet
-MAX_FOLLOW_UPS = 3
-FOLLOW_UP_WORDS = 7
-NOT_FOUND_TIPS = [
-    "Use the words the document uses (item name, symbol or heading).",
-    "Check that the document with the answer is uploaded.",
-    "Ask about one value or topic at a time.",
-]
 WORD_RE = re.compile(r"\w+(?:[.,]\d+)*")
 
 
@@ -47,103 +46,102 @@ def _attr(text: str) -> str:
 
 @dataclass
 class Trace:
-    """What happened while answering one question (shown as the process trail)."""
+    """What happened while answering one question."""
     question: str = ""
     docs: int = 0  # documents searched
     retrieved: list[Passage] = field(default_factory=list)  # all passages retrieval returned
     seconds: float = 0.0
 
 
+def topbar_html(app_name: str) -> str:
+    return f"<div class='id-topbar'><div class='id-logo'>{esc(app_name)}</div></div>"
+
+
 # --------------------------------------------------------------------------- #
-# Top bar, trail, tags, confidence
+# Confidence: is a passage strong enough to show on its own?
 # --------------------------------------------------------------------------- #
-def plural(n: int, word: str) -> str:
-    return f"{n} {word}{'' if n == 1 else 's'}"
-
-
-def topbar_html(app_name: str, docs: int, pages: int, ai_label: str, ai_tone: str, ai_tip: str = "") -> str:
-    return (f"<div class='id-topbar'><div class='id-logo'><span class='glyph'></span>{esc(app_name)}</div>"
-            f"<div class='id-livepills'><span class='id-live'>{plural(docs, 'doc')}</span>"
-            f"<span class='id-live'>{plural(pages, 'page')} indexed</span>"
-            f"<span class='id-live {ai_tone}' title='{_attr(ai_tip)}'><span class='dot'></span>{esc(ai_label)}</span>"
-            f"</div></div>")
-
-
-def trail_steps(ans: Answer, trace: Trace) -> list[tuple[str, str]]:
-    """(step text, tone) pairs; tone is ok | warn | bad."""
-    searched = (f"Searched {plural(trace.docs, 'document')}", "ok")
-    if ans.mode == "exact" and ans.fact:
-        f = ans.fact
-        matched = f"Matched item {f.item}" if f.item else f"Matched “{_short(f.name or f.item_title, 6)}”"
-        verified = ("Value verified in source", "ok") if f.value and f.value in f.line else ("Value from source line", "ok")
-        return [searched, (matched, "ok"), verified]
-    if ans.mode in AI_MODES:
-        checked = ("Numbers checked", "ok") if not ans.unverified else ("Numbers to check", "warn")
-        return [searched, (f"Read {plural(len(trace.retrieved), 'passage')}", "ok"),
-                (f"{AI_MODES[ans.mode]} wrote answer", "ok"), checked]
-    if ans.mode == "sources":
-        why = sources_tag(ans)
-        # The passages shown (sources mode shows the best few), so the count matches "All passages (N)"
-        return [searched, (f"Found {plural(len(ans.passages), 'passage')}", "ok"), (why, "warn")]
-    if ans.mode == "not_found":
-        return [searched, ("No match in the documents", "bad")]
-    return [("Something went wrong", "bad")]
-
-
-def trail_html(steps: list[tuple[str, str]], seconds: float) -> str:
-    parts = [f"<span class='id-step {tone}'><span class='dot'></span>{esc(text)}</span>" for text, tone in steps]
-    return (f"<div class='id-trail'>{'<span class=sep>›</span>'.join(parts)}"
-            f"<span class='id-time'>· {seconds:.1f} s</span></div>")
-
-
-def is_quota(note: str) -> bool:
-    return "quota" in note.lower()
-
-
-def sources_tag(ans: Answer) -> str:
-    """Label of a sources-mode card: why there is no AI answer."""
-    return "Quota used up" if is_quota(ans.note) else "AI answer failed" if ans.ai_failed else "AI off"
-
-
-def sources_reason(ans: Answer) -> str:
-    """The message under a sources-mode card."""
-    if ans.ai_failed:  # e.g. "Gemini is busy right now. Showing the matching passages instead. ..."
-        return f"AI answer failed: {ans.note}"
-    return SOURCES_MODE_NOTE + (f" {ans.note}" if ans.note else "")
-
-
-def answered_by_html(ans: Answer) -> str:
-    """Small text on the AI card: which AI wrote the answer (Gemini / Groq backup chain only)."""
-    return f"<div class='id-reason'>Answered by {esc(ans.answered_by)}</div>" if ans.answered_by else ""
-
-
-def tag_html(text: str, tone: str) -> str:
-    return f"<span class='id-tag {tone}'><span class='dot'></span>{esc(text)}</span>"
-
-
 def confidence(score: float, exact: bool, min_score: float, fact_match_score: float) -> str:
     """High / Medium / Low from the retrieval score that already decided the answer (no new model)."""
+    # rounded: 0.55 + 0.15 is 0.7000000000000001 in floating point, and 0.70 must count as High
     if exact:
-        return "High" if score >= fact_match_score + EXACT_HIGH_MARGIN else "Medium"
-    if score >= min_score + PASSAGE_HIGH_MARGIN:
+        return "High" if score >= round(fact_match_score + EXACT_HIGH_MARGIN, 6) else "Medium"
+    if score >= round(min_score + PASSAGE_HIGH_MARGIN, 6):
         return "High"
-    return "Medium" if score >= min_score + PASSAGE_MEDIUM_MARGIN else "Low"
+    return "Medium" if score >= round(min_score + PASSAGE_MEDIUM_MARGIN, 6) else "Low"
 
 
-def meter_html(level: str) -> str:
-    tip = "How closely the best source matches your question (from the search scores)"
-    return (f"<span class='id-meter {level.lower()}' title='{tip}'><i></i><i></i><i></i>"
-            f"<b>{level}</b></span>")
-
-
-def card_head_html(tags: list[str], level: str | None) -> str:
-    return (f"<div class='id-head'><div class='id-tags'>{''.join(tags)}</div>"
-            f"{meter_html(level) if level else ''}</div>")
+def is_strong(p: Passage, min_score: float) -> bool:
+    """A passage is shown on its own (no AI answer) only with a High match: score >= MIN_SCORE + 0.15
+    (0.70 with the default 0.55), where clear matches start; off-topic questions score 0.58-0.59."""
+    return confidence(p.score, False, min_score, 0.0) == "High"
 
 
 # --------------------------------------------------------------------------- #
-# Exact value
+# The answer card
 # --------------------------------------------------------------------------- #
+@dataclass
+class CardView:
+    """Everything one answer card shows (and what the Q&A log records)."""
+    kind: str  # "exact" | "ai" | "passage" | "not_found" | "error"
+    answer_html: str = ""  # the answer line (exact and AI answers only)
+    answer_text: str = ""  # the same, as plain text
+    file_name: str = ""
+    page: int = 0
+    quote_html: str = ""
+    quote_text: str = ""
+    message: str = ""  # not found / error: the one line shown
+
+    @property
+    def copy_text(self) -> str:
+        return self.answer_text or self.quote_text
+
+
+def card_view(ans: Answer, question: str, min_score: float) -> CardView:
+    if ans.mode == "exact" and ans.fact:
+        f: Fact = ans.fact
+        return CardView("exact", exact_answer_html(f), ans.text, f.file_name, f.page,
+                        mark_value(f.line, f.value), f.line)
+    if ans.mode in AI_MODES:
+        text = clean_ai_text(ans.text)
+        view = CardView("ai", _key_numbers(text), text)
+        if ans.passages:
+            best = ans.passages[0]  # the first passage the answer cites
+            view.file_name, view.page = best.file_name, best.page
+            view.quote_html, view.quote_text = snippet(best.text, question)[0], snippet_text(best.text, question)
+        return view
+    if ans.mode == "sources" and ans.passages and is_strong(ans.passages[0], min_score):
+        best = ans.passages[0]  # AI off, failed or not checked: the best passage, without any message
+        return CardView("passage", file_name=best.file_name, page=best.page,
+                        quote_html=snippet(best.text, question)[0], quote_text=snippet_text(best.text, question))
+    if ans.mode in ("not_found", "sources"):
+        return CardView("not_found", message=NOT_FOUND)
+    return CardView("error", message=ans.text)
+
+
+def card_html(view: CardView) -> str:
+    if view.kind in ("not_found", "error"):
+        return f"<div class='id-nf'>{esc(view.message)}</div>"
+    parts = []
+    if view.answer_html:
+        parts.append(f"<div class='id-answer'>{view.answer_html}</div>")
+    if view.file_name:
+        page = f"<span class='sep'>·</span>p. {view.page}" if view.page else ""
+        parts.append(f"<div class='id-where'><span class='file'>{esc(view.file_name)}</span>{page}</div>")
+    if view.quote_html:
+        parts.append(f"<div class='id-qlabel'>{QUOTE_LABEL}</div><div class='id-quote'>{view.quote_html}</div>")
+    return "".join(parts)
+
+
+def exact_answer_html(f: Fact) -> str:
+    """The answer line of an exact value: its name, then the value (and unit) in maroon."""
+    if f.kind == "qa":
+        return _key_numbers(f.value)
+    unit = f" {esc(f.unit)}" if f.unit else ""
+    name = f.name or f.item_title
+    label = f"<span class='name'>{esc(name)}</span> " if name else ""
+    return f"{label}<span class='key'>{esc(f.value)}{unit}</span>"
+
+
 def mark_value(line: str, value: str) -> str:
     """The source line escaped, with the first occurrence of the value highlighted."""
     i = line.find(value) if value else -1
@@ -152,40 +150,27 @@ def mark_value(line: str, value: str) -> str:
     return f"{esc(line[:i])}<mark class='val'>{esc(value)}</mark>{esc(line[i + len(value):])}"
 
 
-def exact_html(ans: Answer) -> str:
-    """Body of the exact-value card: label line, the value, 'matches' line, quote block."""
-    f: Fact = ans.fact
-    if f.kind == "qa":
-        label = esc(f.name)
-        value = f"<div class='id-xvalue qa'>{esc(f.value)}</div>"
-    else:
-        bits = [esc(f.name or f.item_title)]
-        if f.symbol:
-            bits.append(f"<span class='sym'>{esc(f.symbol)}</span>")
-        if f.item:
-            bits.append(f"Item {esc(f.item)}")
-        label = " · ".join(bits)
-        unit = f"<span class='unit'>{esc(f.unit)}</span>" if f.unit else ""
-        value = f"<div class='id-xvalue'><span class='num'>{esc(f.value)}</span>{unit}</div>"
-    formula = f"<div class='id-formula'>{esc(f.formula)}</div>" if f.formula else ""
-    verified = ("<div class='id-verified'>✓ Matches the source word for word</div>" if f.value and f.value in f.line
-                else "<div class='id-verified'>Taken from the source line below</div>")
-    return (f"<div class='id-xlabel'>{label}</div>{value}{formula}{verified}"
-            f"<div class='id-quote'>{mark_value(f.line, f.value)}</div>")
+def clean_ai_text(text: str) -> str:
+    """The AI answer without [file, p.N] citations (the card shows the source) and without
+    markdown bold markers. Digits, units and words are not changed."""
+    text = CITATION_RE.sub("", text).replace("**", "")
+    text = re.sub(r"[ \t]+([.,;:!?])(?=\s|$)", r"\1", text)  # "540 N·m [a.pdf]." -> "540 N·m."
+    return "\n".join(line.rstrip() for line in text.strip().splitlines())
 
 
-def copy_label(ans: Answer) -> str:
-    if ans.mode == "exact" and ans.fact and ans.fact.kind != "qa":
-        return f"Copy {_short(ans.text, 4)}"
-    return "Copy"
+def _key_numbers(text: str) -> str:
+    """Escaped text with every number in maroon (the number itself is not changed)."""
+    out, last = [], 0
+    for m in NUMBER_RE.finditer(text):
+        number = m.group().rstrip(",")
+        out.append(esc(text[last:m.start()]) + f"<span class='key'>{esc(number)}</span>")
+        last = m.start() + len(number)
+    return "".join(out) + esc(text[last:])
 
 
-def copy_text(ans: Answer) -> str:
-    if ans.mode == "sources" and ans.passages:
-        return ans.passages[0].text
-    return ans.text
-
-
+# --------------------------------------------------------------------------- #
+# Copy button
+# --------------------------------------------------------------------------- #
 # One click handler for every copy button on the page (Streamlit strips onclick="..." attributes,
 # but runs scripts in st.html(..., unsafe_allow_javascript=True)). The guard installs it only once.
 COPY_SCRIPT = """<script>
@@ -209,93 +194,7 @@ def copy_button_html(label: str, text: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# AI answer: numbered citations and source cards
-# --------------------------------------------------------------------------- #
-def unique_sources(passages: list[Passage]) -> list[Passage]:
-    """One entry per citation label (file + page), best score first kept in order."""
-    seen: dict[str, Passage] = {}
-    for p in passages:
-        if p.label not in seen or p.score > seen[p.label].score:
-            seen[p.label] = p
-    order = list(dict.fromkeys(p.label for p in passages))
-    return [seen[label] for label in order]
-
-
-def cited_html(text: str, sources: list[Passage]) -> str:
-    """LLM answer (markdown-safe) with [file, p.N] citations turned into numbered badges."""
-    numbers = {p.label: i for i, p in enumerate(sources, 1)}
-    safe = html.escape(text, quote=False).replace("$", "&#36;")
-
-    def badges(m: re.Match) -> str:
-        out = []
-        for part in (x.strip() for x in m.group(1).split(";")):
-            if not part:
-                continue
-            n = numbers.get(html.unescape(part))
-            out.append(f"<span class='cite' title='{_attr(html.unescape(part))}'>{n}</span>" if n
-                       else f"<span class='chip'>{part}</span>")
-        return "".join(out)
-
-    return CITATION_RE.sub(badges, safe)
-
-
-def has_numbers(text: str) -> bool:
-    return bool(NUMBER_RE.search(BRACKETS_RE.sub(" ", text)))
-
-
-def source_cards_html(sources: list[Passage]) -> str:
-    cards = []
-    for i, p in enumerate(sources, 1):
-        where = [f"p. {p.page}"] if p.page else []
-        if p.section:
-            where.append(esc(_short(p.section, 6)))
-        width = max(0.0, min(1.0, p.score)) * 100
-        cards.append(f"<div class='id-src'><div class='top'><span class='n'>{i}</span>"
-                     f"<span class='file' title='{_attr(p.file_name)}'>{esc(p.file_name)}</span></div>"
-                     f"<div class='where'>{' · '.join(where) or '&nbsp;'}</div>"
-                     f"<div class='bar' title='relevance {p.score:.2f}'><i style='width:{width:.0f}%'></i></div></div>")
-    return f"<div class='id-srcgrid'>{''.join(cards)}</div>"
-
-
-def follow_ups(question: str, passages: list[Passage]) -> list[str]:
-    """Up to 3 short questions from the headings of the retrieved passages (no LLM call).
-
-    Headings whose words are all already in the question are skipped (that is the topic
-    just asked about).
-    """
-    asked = _content_words(question)
-    out: list[str] = []
-    seen: set[frozenset] = set()
-    for p in passages:
-        heading = _clean_heading(p.section)
-        words = _content_words(heading)
-        if not words or words <= asked or frozenset(words) in seen:
-            continue
-        seen.add(frozenset(words))
-        out.append(f"What about {heading}?")
-        if len(out) == MAX_FOLLOW_UPS:
-            break
-    return out
-
-
-def _clean_heading(section: str) -> str:
-    h = re.sub(r"^\s*(?:(?:section|item|part)\s+)?(?:\d+(?:\.\d+)*\.?|\(\w{1,3}\)|[A-Z]\.)\s+", "",
-               section.strip(), flags=re.IGNORECASE)
-    first = re.split(r"\s*[,:;(]\s*", h, maxsplit=1)[0]
-    if len(first.split()) >= 2:
-        h = first
-    h = _short(h.rstrip(" .:-"), FOLLOW_UP_WORDS)
-    # Title Case headings read oddly inside a question: lower-case the words, keep acronyms like "IT"
-    return " ".join(w if len(w) > 1 and w.isupper() else w.lower() for w in h.split())
-
-
-def _short(text: str, words: int) -> str:
-    parts = text.split()
-    return " ".join(parts[:words]) + ("…" if len(parts) > words else "")
-
-
-# --------------------------------------------------------------------------- #
-# Sources mode: best passage trimmed around the match, matched words highlighted
+# The quote: best passage trimmed around the match, matched words highlighted
 # --------------------------------------------------------------------------- #
 def _stem(word: str) -> str:
     w = word.lower()
@@ -327,16 +226,22 @@ def _units(text: str) -> list[str]:
     return units
 
 
-def snippet(text: str, question: str) -> tuple[str, str]:
-    """(HTML of about 3 lines around the best match, the best matching line).
-
-    The lines are shown exactly as in the passage; '…' marks text left out.
-    """
+def _window(text: str, question: str) -> tuple[list[str], int, int, list[int], set[str]]:
+    """(lines of the passage, start of the best ~3-line window, its size, hits per line, question words)."""
     words = _content_words(question)
     units = _units(text) or [text]
     hits = [len({_stem(w) for w in WORD_RE.findall(u)} & words) for u in units]
     n = min(SNIPPET_LINES, len(units))
     start = max(range(len(units) - n + 1), key=lambda i: (sum(hits[i:i + n]), -i))
+    return units, start, n, hits, words
+
+
+def snippet(text: str, question: str) -> tuple[str, str]:
+    """(HTML of about 3 lines around the best match, the best matching line).
+
+    The lines are shown exactly as in the passage; '…' marks text left out.
+    """
+    units, start, n, hits, words = _window(text, question)
     window = units[start:start + n]
     focus = window[max(range(n), key=lambda j: hits[start + j])]
     body = "<br>".join(_highlight(u, words) for u in window)
@@ -345,23 +250,12 @@ def snippet(text: str, question: str) -> tuple[str, str]:
     return before + body + after, focus
 
 
-def source_line_html(p: Passage) -> str:
-    where = [esc(p.file_name)] + ([f"p. {p.page}"] if p.page else []) + ([esc(p.section)] if p.section else [])
-    return f"<div class='id-srcline'>{' · '.join(where)}</div>"
-
-
-# --------------------------------------------------------------------------- #
-# Not found, loading
-# --------------------------------------------------------------------------- #
-def not_found_html() -> str:
-    tips = "".join(f"<li>{esc(t)}</li>" for t in NOT_FOUND_TIPS)
-    return f"<div class='id-nf'>{esc(NOT_FOUND)}</div><ul class='id-tips'>{tips}</ul>"
+def snippet_text(text: str, question: str) -> str:
+    """The same lines as snippet(), as plain text (for Copy and the Q&A log)."""
+    units, start, n, _, _ = _window(text, question)
+    return "\n".join(units[start:start + n])
 
 
 def skeleton_html() -> str:
     return ("<div class='id-skelcard'><div class='id-skel'><div class='sk w30'></div><div class='sk w90'></div>"
             "<div class='sk w75'></div><div class='sk w55'></div></div></div>")
-
-
-def preview_skeleton_html() -> str:
-    return "<div class='id-prevskel'><div class='sk'></div></div>"
