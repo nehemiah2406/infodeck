@@ -124,6 +124,12 @@ def upload_with_plus(page, path: Path, expected_note: str) -> None:
     page.get_by_text(expected_note).wait_for(timeout=60_000)
 
 
+def sidebar_documents(page) -> list[str]:
+    """The lines of the documents list in the sidebar (name, plus "Reading..." while being read)."""
+    rows = page.locator("[data-testid='stSidebar'] .id-doc")
+    return [" ".join(rows.nth(i).inner_text().split()) for i in range(rows.count())]
+
+
 def test_empty_screen_send_upload_refresh_and_restart(app, browser, tmp_path):
     doc = tmp_path / "valve.txt"
     doc.write_text(DOC, encoding="utf-8")
@@ -133,10 +139,12 @@ def test_empty_screen_send_upload_refresh_and_restart(app, browser, tmp_path):
     main = page.locator("[data-testid='stMainBlockContainer']").inner_text()
     assert main.split() == ["InfoDeck"]
     assert page.locator("[data-testid='stMainBlockContainer'] .stButton").count() == 0
+    assert sidebar_documents(page) == []  # no documents yet (no samples in this test)
 
-    # 3. Upload with + : a clear note when it is ready
+    # 3. Upload with + : a clear note when it is ready, and the file in the sidebar list (name only)
     upload_with_plus(page, doc, "valve.txt is ready.")
     assert app.reads("valve.txt") == 1
+    assert sidebar_documents(page) == ["valve.txt"]
 
     # 2. Click the send arrow: the question is answered from the uploaded file
     assert "valve.txt" in ask(page, QUESTION)
@@ -144,14 +152,18 @@ def test_empty_screen_send_upload_refresh_and_restart(app, browser, tmp_path):
     # 4a. Refresh the page: the document is still ready, nothing is read again
     page.reload()
     page.wait_for_selector("textarea", timeout=60_000)
+    page.wait_for_timeout(1000)
+    assert sidebar_documents(page) == ["valve.txt"]  # documents loaded before the refresh are listed
     assert "valve.txt" in ask(page, QUESTION)
     upload_with_plus(page, doc, "valve.txt is already loaded and unchanged, so it was not read again.")
     assert app.reads("valve.txt") == 1
+    assert sidebar_documents(page) == ["valve.txt"]  # still one line
 
     # 4b. Restart the app: still ready from storage, the unchanged file is not read again
     app.stop()
     app.start()
     page = open_app(browser, app)
+    assert sidebar_documents(page) == ["valve.txt"]  # listed from storage after a restart
     assert "valve.txt" in ask(page, QUESTION)
     upload_with_plus(page, doc, "valve.txt is already loaded and unchanged, so it was not read again.")
     assert app.reads("valve.txt") == 1
@@ -160,4 +172,26 @@ def test_empty_screen_send_upload_refresh_and_restart(app, browser, tmp_path):
     doc.write_text(CHANGED, encoding="utf-8")
     upload_with_plus(page, doc, "valve.txt has new content: it was read again and is ready.")
     assert app.reads("valve.txt") == 2
+    assert sidebar_documents(page) == ["valve.txt"]  # replaced, not listed twice
     assert "14.0" in ask(page, QUESTION)
+
+
+def test_sidebar_shows_reading_while_a_scan_is_read_then_just_the_name(app, browser, tmp_path):
+    from scripts.make_eval_docs import make_scanned_pdf
+
+    scan = tmp_path / "scan.pdf"  # a scan is read with OCR: slow enough to see "Reading..."
+    topics = ["Pump speed is 1450 rpm", "Valve clearance is 12.5 mm", "Bolt torque is 540 N m",
+              "Shaft diameter is 180 mm", "Oil pressure is 4.2 bar", "Coolant flow is 35 litres",
+              "Bearing gap is 0.15 mm", "Filter change every 500 hours"]
+    # every page different: lines repeated on all pages would be removed as headers/footers
+    make_scanned_pdf(scan, [[topic, f"Inspection record {chr(65 + n)} for unit {n * 7 + 3}"]
+                            for n, topic in enumerate(topics)])
+    page = open_app(browser, app)
+    page.locator("[data-testid='stSidebar'] input[type=file]").set_input_files(str(scan))
+    page.wait_for_function("[...document.querySelectorAll(\"[data-testid='stSidebar'] .id-doc\")]"
+                           ".some(e => e.innerText.includes('scan.pdf') && e.innerText.includes('Reading...'))",
+                           timeout=60_000)
+    page.get_by_text("scan.pdf is ready.").wait_for(timeout=180_000)
+    page.wait_for_function("[...document.querySelectorAll(\"[data-testid='stSidebar'] .id-doc\")]"
+                           ".some(e => e.innerText.trim() === 'scan.pdf')", timeout=30_000)
+    assert sidebar_documents(page) == ["scan.pdf"]

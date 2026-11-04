@@ -51,6 +51,12 @@ p, li { color: var(--text); }
 [data-testid="stSidebar"] { background: var(--sidebar) !important; border-right: 1px solid var(--line); }
 .id-brand { font-size: 1.7rem; margin: 0 0 1rem 0; }
 .id-types { font-size: .8rem; color: var(--muted); margin-top: -.4rem; }
+/* The loaded documents: one line each, file name only */
+.id-docs { margin-top: .4rem; border-top: 1px solid var(--line); padding-top: .7rem; }
+.id-doc { display: flex; align-items: baseline; gap: .5rem; padding: .32rem 0; font-size: .86rem;
+    color: var(--text); border-bottom: 1px solid rgba(42, 26, 28, .06); }
+.id-doc .name { overflow-wrap: anywhere; }
+.id-doc .reading { flex: none; margin-left: auto; font-size: .74rem; font-style: italic; color: var(--maroon); }
 /* The upload drop zone becomes one maroon "Upload" button */
 [data-testid="stFileUploaderDropzone"] {
     background: transparent !important; border: none !important; padding: 0 !important;

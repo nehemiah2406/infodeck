@@ -141,5 +141,24 @@ def test_snippet_escapes_and_keeps_short_passages_whole():
     assert "&lt;b&gt;5&lt;/b&gt; &amp; more" in html and "…" not in html
 
 
+def test_sidebar_lists_every_loaded_document_and_marks_files_still_being_read():
+    from types import SimpleNamespace as NS
+
+    from infodeck.ui import READING, document_list, document_list_html
+
+    docs = [NS(doc_id="a", file_name="KRT_Leave_Policy.pdf"), NS(doc_id="b", file_name="big_scan.pdf")]
+    jobs = [NS(doc_id="b", file_name="big_scan.pdf"),  # first pages searchable, still reading
+            NS(doc_id="c", file_name="queued <x>.pdf")]  # waiting, nothing searchable yet
+    items = document_list(docs, jobs)
+    assert items == [("KRT_Leave_Policy.pdf", False), ("big_scan.pdf", True), ("queued <x>.pdf", True)]
+    html = document_list_html(items)
+    assert html.count("<div class='id-doc'>") == 3 and html.count(READING) == 2
+    assert "<div class='id-doc'><span class='name'>KRT_Leave_Policy.pdf</span></div>" in html  # name only
+    assert "queued &lt;x&gt;.pdf" in html  # file names are escaped
+    # documents loaded before a refresh or restart come from the store: shown without "Reading..."
+    assert document_list(docs, []) == [("KRT_Leave_Policy.pdf", False), ("big_scan.pdf", False)]
+    assert document_list_html([]) == ""  # no documents: no list
+
+
 def test_topbar_is_the_logo_only():
     assert topbar_html("InfoDeck") == "<div class='id-topbar'><div class='id-logo'>InfoDeck</div></div>"

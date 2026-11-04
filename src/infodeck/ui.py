@@ -58,6 +58,30 @@ def topbar_html(app_name: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Sidebar: the loaded documents
+# --------------------------------------------------------------------------- #
+READING = "Reading..."
+
+
+def document_list(docs, active_jobs) -> list[tuple[str, bool]]:
+    """(file name, still being read) per document: every loaded document (also those loaded before a
+    refresh or restart), then files still waiting or being read that have no searchable pages yet."""
+    reading = {j.doc_id: j.file_name for j in active_jobs}
+    loaded = {d.doc_id for d in docs}
+    return ([(d.file_name, d.doc_id in reading) for d in docs] +
+            [(name, True) for doc_id, name in reading.items() if doc_id not in loaded])
+
+
+def document_list_html(items: list[tuple[str, bool]]) -> str:
+    if not items:
+        return ""
+    rows = "".join(f"<div class='id-doc'><span class='name'>{esc(name)}</span>"
+                   + (f"<span class='reading'>{READING}</span>" if reading else "") + "</div>"
+                   for name, reading in items)
+    return f"<div class='id-docs'>{rows}</div>"
+
+
+# --------------------------------------------------------------------------- #
 # Confidence: is a passage strong enough to show on its own?
 # --------------------------------------------------------------------------- #
 def confidence(score: float, exact: bool, min_score: float, fact_match_score: float) -> str:

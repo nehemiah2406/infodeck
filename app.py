@@ -27,8 +27,8 @@ from infodeck.llm import BackupChain, LLMError, resolve_llm  # noqa: E402
 from infodeck.prompts import NOT_FOUND  # noqa: E402
 from infodeck.qa_log import log_answer  # noqa: E402
 from infodeck.store import VectorStore  # noqa: E402
-from infodeck.ui import (CardView, Trace, card_html, card_view, copy_button_html, esc, skeleton_html,  # noqa: E402
-                         topbar_html)
+from infodeck.ui import (CardView, Trace, card_html, card_view, copy_button_html, document_list,  # noqa: E402
+                         document_list_html, esc, skeleton_html, topbar_html)
 
 log = logging.getLogger("infodeck.app")
 
@@ -249,21 +249,22 @@ def main() -> None:
 
     st.markdown(topbar_html(APP_NAME), unsafe_allow_html=True)
 
-    # Sidebar: logo, Upload, file types (+ progress and errors while uploading)
+    docs = engine.store.list_documents()
+    still_loading = bool(engine.jobs.active())
+
+    # Sidebar: logo, Upload, file types, the loaded documents (+ progress and notes while uploading)
     with st.sidebar:
         st.markdown(f"<div class='id-brand'>{APP_NAME}</div>", unsafe_allow_html=True)
         files = st.file_uploader("Upload", type=UPLOAD_TYPES, accept_multiple_files=True,
                                  key=f"uploader_{ss.uploader_key}", label_visibility="collapsed")
         st.markdown(f"<div class='id-types'>{UPLOAD_HINT}</div>", unsafe_allow_html=True)
+        st.markdown(document_list_html(document_list(docs, engine.jobs.active())), unsafe_allow_html=True)
         if files:
             ss.upload_notes = [("sidebar", *n) for n in ingest_files(engine, files, "sidebar")]
             ss.uploader_key += 1  # clears the upload box
             st.rerun()
         show_notes([(kind, msg) for where, kind, msg in ss.upload_notes if where == "sidebar"])
         loading_panel(engine)
-
-    docs = engine.store.list_documents()
-    still_loading = bool(engine.jobs.active())
 
     # Main area: the chat (an empty chat shows only the title above and the input box)
     for i, m in enumerate(ss.messages):
