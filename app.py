@@ -32,17 +32,11 @@ from infodeck.ui import (CardView, Trace, card_html, card_view, copy_button_html
 
 log = logging.getLogger("infodeck.app")
 
-HEADLINE = "Every answer, straight from your documents"
-TAGLINE = "Ask questions about your company policies and files. Each answer cites the page it came from."
 UPLOAD_HINT = "PDF, Word, Excel, PowerPoint, text or image files"
 MAX_UPLOAD_MB = 200
 SMALL_FILE_WAIT_SECONDS = 5  # after an upload, wait this long so quick files are ready at once
 UPLOAD_TYPES = ["pdf", "docx", "txt", "xlsx", "csv", "pptx", "png", "jpg", "jpeg"]
-SAMPLE_QUESTIONS = [
-    "How many earned leave days do I get per year?",
-    "What is the hotel limit per night in Mumbai?",
-    "What should I do if I lose my laptop?",
-]
+NOTE_STYLE = {"ok": st.success, "info": st.info, "error": st.error}
 
 
 # --------------------------------------------------------------------------- #
@@ -78,9 +72,22 @@ def render_answer(ans: Answer, trace: Trace, idx: int, still_loading: bool) -> C
 # --------------------------------------------------------------------------- #
 # Uploads
 # --------------------------------------------------------------------------- #
-def upload_errors(r) -> list[str]:
-    """Messages of an IngestResult worth showing: only errors (no success or info messages)."""
-    return [] if r.status in ("added", "replaced", "duplicate", "loading", "cancelled", "queued") else [r.message]
+def upload_notes(r) -> list[tuple[str, str]]:
+    """One (kind, message) line per upload, so every upload visibly ends: ready, unchanged, error..."""
+    name = r.file_name
+    notes = {"added": ("ok", f"{name} is ready."),
+             "replaced": ("ok", f"{name} has new content: it was read again and is ready."),
+             "duplicate": ("info", f"{name} is already loaded and unchanged, so it was not read again."),
+             "loading": ("info", f"{name} is already being read."),
+             "cancelled": ("info", f"Stopped reading {name}."),
+             "queued": None}
+    note = notes.get(r.status, ("error", r.message))
+    return [note] if note else []
+
+
+def show_notes(notes: list[tuple[str, str]]) -> None:
+    for kind, msg in notes:
+        NOTE_STYLE[kind](msg)
 
 
 def job_text(job) -> str:
@@ -91,27 +98,30 @@ def job_text(job) -> str:
     return f"Waiting: {job.file_name} (files are read one at a time)"
 
 
-def ingest_files(engine: InfoDeckEngine, files) -> list[str]:
-    """Queue uploaded files to be read in the background, one at a time. Returns error messages.
+def ingest_files(engine: InfoDeckEngine, files, where: str) -> list[tuple[str, str]]:
+    """Queue uploaded files to be read in the background, one at a time. Returns the upload notes.
+
+    where: "sidebar" (Upload button) or "chat" (+ in the chat box): notes of files that are still
+    being read appear there when they are done.
 
     Quick files are waited for a few seconds so they are ready right away; big ones keep loading
     (progress in the sidebar) while the user can already ask about finished pages.
     """
-    errors, queued = [], []
+    notes, queued = [], []
     for f in files:
         try:
             if f.size > MAX_UPLOAD_MB * 1024 * 1024:
-                errors.append(f"{f.name} is larger than {MAX_UPLOAD_MB} MB.")
+                notes.append(("error", f"{f.name} is larger than {MAX_UPLOAD_MB} MB."))
                 continue
             r = engine.queue_upload(f.name, f.getvalue())
         except Exception:
             log.exception("Upload failed for %s", f.name)
-            errors.append(f"{f.name} could not be added. Please try again.")
+            notes.append(("error", f"{f.name} could not be added. Please try again."))
             continue
         if r.status == "queued":
             queued.append(r.doc_id)
         else:
-            errors += upload_errors(r)
+            notes += upload_notes(r)
     if queued:
         bar = st.progress(0.0, text="Reading...")
         deadline = time.monotonic() + SMALL_FILE_WAIT_SECONDS
@@ -124,10 +134,10 @@ def ingest_files(engine: InfoDeckEngine, files) -> list[str]:
         for d in queued:
             job = engine.jobs.get(d)
             if job.active:
-                ss.watch.add(d)
+                ss.watch[d] = where
             else:
-                errors += upload_errors(job.result)
-    return errors
+                notes += upload_notes(job.result)
+    return notes
 
 
 @st.fragment(run_every=2)
@@ -142,10 +152,10 @@ def loading_panel(engine: InfoDeckEngine) -> None:
             st.rerun(scope="app")
     finished = [d for d in ss.watch if not engine.jobs.get(d).active]
     for d in finished:
-        ss.watch.discard(d)
+        where = ss.watch.pop(d)
         result = engine.jobs.get(d).result
         if result is not None:
-            ss.upload_errors = ss.upload_errors + upload_errors(result)
+            ss.upload_notes = ss.upload_notes + [(where, *n) for n in upload_notes(result)]
     # Refresh the whole page when a job starts, finishes, or its first pages become searchable.
     signature = (engine.jobs.finished_count,
                  tuple((j.doc_id, j.status, engine.store.has_document(j.doc_id)) for j in jobs))
@@ -234,8 +244,8 @@ def main() -> None:
     ss = st.session_state
     ss.setdefault("messages", [])
     ss.setdefault("uploader_key", 0)
-    ss.setdefault("upload_errors", [])  # shown in the sidebar until the next question
-    ss.setdefault("watch", set())  # documents this browser tab uploaded that are still being read
+    ss.setdefault("upload_notes", [])  # (where, kind, message): shown until the next question
+    ss.setdefault("watch", {})  # doc_id -> where it was uploaded, while this tab's upload is still read
 
     st.markdown(topbar_html(APP_NAME), unsafe_allow_html=True)
 
@@ -246,32 +256,16 @@ def main() -> None:
                                  key=f"uploader_{ss.uploader_key}", label_visibility="collapsed")
         st.markdown(f"<div class='id-types'>{UPLOAD_HINT}</div>", unsafe_allow_html=True)
         if files:
-            ss.upload_errors = ingest_files(engine, files)
+            ss.upload_notes = [("sidebar", *n) for n in ingest_files(engine, files, "sidebar")]
             ss.uploader_key += 1  # clears the upload box
             st.rerun()
-        for msg in ss.upload_errors:
-            st.error(msg)
+        show_notes([(kind, msg) for where, kind, msg in ss.upload_notes if where == "sidebar"])
         loading_panel(engine)
 
     docs = engine.store.list_documents()
     still_loading = bool(engine.jobs.active())
 
-    # Main area: chat
-    welcome = st.empty()  # headline + example questions, only while the chat is empty
-    with welcome.container():
-        if not ss.messages:
-            st.markdown(f"<div class='id-hero'><div class='id-headline'>{HEADLINE}</div>"
-                        f"<div class='id-tagline'>{TAGLINE}</div></div>", unsafe_allow_html=True)
-        if not docs:
-            st.info("Click + in the chat box (or Upload in the sidebar) to add a PDF, Word, Excel, PowerPoint, "
-                    "text or image file.")
-        elif not ss.messages and any(d.file_name.startswith("KRT_") for d in docs):
-            with st.container(key="samples", horizontal=True):
-                for q in SAMPLE_QUESTIONS:
-                    if st.button(q, key=f"sample_{q}"):
-                        ss.pending_question = q
-                        st.rerun()
-
+    # Main area: the chat (an empty chat shows only the title above and the input box)
     for i, m in enumerate(ss.messages):
         with st.chat_message(m["role"]):
             if m["role"] == "user":
@@ -279,11 +273,12 @@ def main() -> None:
             else:
                 render_answer(m["answer"], m.get("trace") or Trace(), i, still_loading)
 
+    show_notes([(kind, msg) for where, kind, msg in ss.upload_notes if where == "chat"])
     typed = st.chat_input("Ask a question or attach a document...", accept_file="multiple",
                           file_type=UPLOAD_TYPES)
     if typed and typed.files:
         # Index the attached files first; a question typed with them is answered on the next run.
-        ss.upload_errors = ingest_files(engine, typed.files)
+        ss.upload_notes = [("chat", *n) for n in ingest_files(engine, typed.files, "chat")]
         if typed.text.strip():
             ss.pending_question = typed.text.strip()
         st.rerun()
@@ -292,8 +287,7 @@ def main() -> None:
     if question and not docs and not engine.jobs.active():
         st.warning("Please add a document first (use the + button).")
     elif question:
-        welcome.empty()
-        ss.upload_errors = []  # upload errors are only shown while uploading
+        ss.upload_notes = []  # upload notes are only shown until the next question
         ss.messages.append({"role": "user", "content": question})
         with st.chat_message("user"):
             st.markdown(esc(question), unsafe_allow_html=True)

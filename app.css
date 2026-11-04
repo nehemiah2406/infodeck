@@ -47,12 +47,6 @@ p, li { color: var(--text); }
 .id-logo, .id-brand { font-family: var(--serif); font-weight: 600; letter-spacing: .01em; color: var(--maroon); }
 .id-logo { font-size: 1.35rem; }
 
-/* ---------- Hero (empty chat only) ---------- */
-.id-hero { text-align: center; margin: 2.4rem 0 2rem 0; }
-.id-headline { font-family: var(--serif); font-weight: 600; font-size: clamp(2rem, 5vw, 3.1rem);
-    line-height: 1.12; color: var(--text); margin: 0; }
-.id-tagline { color: var(--muted); font-size: 1.02rem; line-height: 1.6; margin: .9rem auto 0 auto; max-width: 520px; }
-
 /* ---------- Sidebar: logo, Upload button, file types ---------- */
 [data-testid="stSidebar"] { background: var(--sidebar) !important; border-right: 1px solid var(--line); }
 .id-brand { font-size: 1.7rem; margin: 0 0 1rem 0; }
@@ -78,9 +72,6 @@ p, li { color: var(--text); }
 }
 .stButton > button:hover { border-color: var(--maroon) !important; background: #fff !important; }
 .stButton > button[kind="primary"] { background: var(--maroon) !important; color: #fbf7f0 !important; }
-/* Example questions */
-.st-key-samples { justify-content: center; }
-.st-key-samples .stButton > button { padding: .45rem 1rem !important; }
 
 /* ---------- Chat ---------- */
 [data-testid^="stChatMessageAvatar"] { display: none !important; }

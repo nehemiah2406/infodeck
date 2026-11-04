@@ -40,6 +40,34 @@ def test_same_name_new_content_replaces_old_version(engine, tmp_path):
     assert "8am" in engine.store.search("office opens", 1)[0].text
 
 
+def test_after_a_restart_unchanged_files_are_never_read_again_only_new_or_changed_ones(settings, monkeypatch):
+    from infodeck import engine as engine_module
+    from infodeck.engine import InfoDeckEngine
+    from infodeck.store import VectorStore
+    from tests.conftest import FakeEmbedder
+
+    first = InfoDeckEngine(VectorStore(settings.chroma_dir, FakeEmbedder()), settings)
+    assert first.queue_upload("Leave Policy.pdf", LEAVE.read_bytes()).status == "queued"
+    assert first.jobs.wait(60) and len(first.store.list_documents()) == 1
+
+    # The app is restarted (a new engine on the same storage folder): the document is still ready ...
+    restarted = InfoDeckEngine(VectorStore(settings.chroma_dir, FakeEmbedder()), settings)
+    reads = []
+    real_iter = engine_module.iter_pdf_pages
+    monkeypatch.setattr(engine_module, "iter_pdf_pages", lambda *a, **k: (reads.append(a[1]), real_iter(*a, **k))[1])
+    assert restarted.store.search("earned leave", 1)[0].file_name == "Leave Policy.pdf"
+    # ... and uploading the same content again (any name) is recognised by its hash: not read again
+    for name in ("Leave Policy.pdf", "leave copy.pdf"):
+        assert restarted.queue_upload(name, LEAVE.read_bytes()).status == "duplicate"
+    assert reads == [] and not restarted.jobs.active()
+    # A changed file is read again
+    changed = (SAMPLE_DIR / "KRT_Travel_and_Expense_Policy.pdf").read_bytes()
+    assert restarted.queue_upload("Leave Policy.pdf", changed).status == "queued"
+    assert restarted.jobs.wait(60) and reads == ["Leave Policy.pdf"]
+    [doc] = restarted.store.list_documents()
+    assert doc.file_name == "Leave Policy.pdf" and restarted.jobs.get(doc.doc_id).result.status == "replaced"
+
+
 def test_remove_document_deletes_chunks_and_uploaded_file(engine):
     engine.save_and_ingest_upload("leave.pdf", LEAVE.read_bytes())
     doc = engine.store.list_documents()[0]
