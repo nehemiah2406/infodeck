@@ -34,6 +34,30 @@ MIN_CHARS_PER_PAGE = 20  # fewer characters than this = "no text" (probably a sc
 SCANNED_IMAGE_COVERAGE = 0.8  # a page mostly covered by one image is treated as a scan
 OCR_DPI = 200  # default page image resolution for OCR (setting OCR_DPI)
 HEADER_SAMPLE_PAGES = 6  # while streaming, headers/footers are found from the first pages (one wave of OCR workers)
+# Text layout version of local PDF parses. Parses made before 2-column pages were read column by
+# column (and wrapped lines joined into sentences) lack it; their text pages are read again.
+LAYOUT = 1
+# Two text columns: a vertical gap in the middle 30-70% of the page that almost no word crosses, with
+# long lines (this many words on average) on both sides, or prose on one side (long lines, some ending
+# a sentence; the other may be e.g. a table of contents). Label/value calc sheets (labels left,
+# short numbers right) have neither and stay as they are.
+COLUMN_MIN_WORDS = 60
+COLUMN_MIN_WORDS_PER_LINE = 5.0
+COLUMN_MIN_SENTENCE_ENDS = 0.15  # share of a prose column's lines ending with . ! ? or :
+COLUMN_ALIGNED_STARTS = 0.7  # share of the right column's lines starting at its left edge (or indent)
+COLUMN_MIN_GUTTER = 10  # points: the empty strip between two columns (a word space is ~3)
+COLUMN_MAX_CROSSING = 0.03  # share of words allowed to cross the gap (e.g. a centred title)
+# A single-column page is treated as prose (wrapped lines joined) only with long lines like these.
+PROSE_MIN_WORDS_PER_LINE = 9.0
+# A "table" of at most this many columns with a cell this long is page layout (text columns), not data.
+LAYOUT_TABLE_MAX_COLS = 3
+LAYOUT_TABLE_LONG_CELL = 400
+LINE_END_RE = re.compile(r"[.!?:;]['\")\]”]?$")
+LIST_START_RE = re.compile(r"^(?:•|\(cid:\d+\)|[-–*]\s|\d{1,3}[.)]\s|\d{1,3}(?:\.\d{1,3})+\s|\(\s*[a-z0-9]{1,3}\s*\)\s)")
+# Endings that are word parts, not words: "inch-" + "es" at a line break is "inches"
+WORD_ENDINGS = {"s", "es", "ed", "er", "ers", "ing", "ings", "ly", "ty", "ity", "ies", "der", "ders", "tion",
+                "tions", "sion", "sions", "ment", "ments", "ness", "ble", "able", "ible", "al", "ial", "ous",
+                "ive", "ure", "ance", "ence", "ate", "ated", "ic", "ics", "ize", "ise", "ward", "lel", "ry"}
 
 # progress(done, total, note): called after each page is read
 Progress = Callable[[int, int, str], None]
@@ -107,21 +131,166 @@ def table_to_text(rows: list[list]) -> str:
 
 
 def _pdf_page_text(page) -> str:
-    """Extract text in reading order, replacing each table with readable rows."""
-    tables = sorted(page.find_tables(), key=lambda t: t.bbox[1])
+    """Extract text in reading order (2-column pages column by column), replacing each table with
+    readable rows."""
+    vocab = {w.lower() for w in re.findall(r"[A-Za-z]+", page.extract_text() or "")}
+    tables = sorted((t for t in page.find_tables() if not _is_layout_table(t)), key=lambda t: t.bbox[1])
     if not tables:
-        return page.extract_text() or ""
+        return _region_text(page, vocab)
     parts, top = [], 0.0
     for t in tables:
         x0, t_top, x1, t_bottom = t.bbox
         if t_top > top:
-            above = page.within_bbox((0, top, page.width, t_top)).extract_text() or ""
-            parts.append(above)
+            parts.append(_region_text(page.within_bbox((0, top, page.width, t_top)), vocab))
         parts.append(table_to_text(t.extract()))
         top = max(top, t_bottom)
     if top < page.height:
-        parts.append(page.within_bbox((0, top, page.width, page.height)).extract_text() or "")
+        parts.append(_region_text(page.within_bbox((0, top, page.width, page.height)), vocab))
     return "\n".join(p for p in parts if p.strip())
+
+
+def _is_layout_table(table) -> bool:
+    """A "table" found around text columns (a few cells holding whole paragraphs) is page layout."""
+    rows = table.extract()
+    cells = [c or "" for row in rows for c in row]
+    return (max((len(r) for r in rows), default=0) <= LAYOUT_TABLE_MAX_COLS
+            and max((len(c) for c in cells), default=0) >= LAYOUT_TABLE_LONG_CELL)
+
+
+def _lines_of(words: list[dict]) -> int:
+    return len({round(w["top"] / 3) for w in words}) or 1
+
+
+def _is_prose(words: list[dict]) -> bool:
+    lines: dict[int, list[dict]] = {}
+    for w in words:
+        lines.setdefault(round(w["top"] / 3), []).append(w)
+    if not lines or len(words) / len(lines) < COLUMN_MIN_WORDS_PER_LINE:
+        return False
+    ends = sum(1 for ws in lines.values() if re.search(r"[.!?:]$", max(ws, key=lambda w: w["x1"])["text"]))
+    return ends / len(lines) >= COLUMN_MIN_SENTENCE_ENDS
+
+
+def _column_gap(words: list[dict], x_min: float, width: float) -> float | None:
+    """x of the gap between two prose columns, or None if the region is not two text columns."""
+    if len(words) < COLUMN_MIN_WORDS:
+        return None
+    best: list[tuple[int, float]] = []
+    for x in range(int(x_min + 0.3 * width), int(x_min + 0.7 * width) + 1, 2):
+        crossing = sum(1 for w in words if w["x0"] < x < w["x1"])
+        best.append((crossing, x))
+    fewest = min(c for c, _ in best)
+    if fewest > COLUMN_MAX_CROSSING * len(words):
+        return None
+    # The widest stretch of x positions crossed by the fewest words is the gutter; between the words of
+    # a single column such a stretch is only a word space wide.
+    runs, run = [], []
+    for c, x in best:
+        if c == fewest and (not run or x - run[-1] <= 2):
+            run.append(x)
+        elif c == fewest:
+            runs.append(run)
+            run = [x]
+    runs.append(run)
+    widest = max(runs, key=len)
+    if widest[-1] - widest[0] < COLUMN_MIN_GUTTER:
+        return None
+    gap = widest[len(widest) // 2]
+    left = [w for w in words if w["x1"] <= gap]
+    right = [w for w in words if w["x0"] >= gap]
+    if min(len(left), len(right)) < 0.2 * len(words):
+        return None
+    both_long = min(len(left) / _lines_of(left), len(right) / _lines_of(right)) >= COLUMN_MIN_WORDS_PER_LINE
+    if not (both_long or _is_prose(left) or _is_prose(right)):
+        return None  # e.g. labels on the left, short values on the right: one table-like column
+    if not _aligned_starts(right):
+        return None  # line endings of one ragged column that happen to leave a gap, not a column
+    return gap
+
+
+def _aligned_starts(words: list[dict]) -> bool:
+    """True if most lines start at one or two x positions (a column's left edge, or a bullet and its
+    indented continuation lines)."""
+    starts: dict[int, float] = {}
+    for w in words:
+        key = round(w["top"] / 3)
+        starts[key] = min(starts.get(key, w["x0"]), w["x0"])
+    positions = Counter(round(x / 3) for x in starts.values())
+    return sum(n for _, n in positions.most_common(2)) >= COLUMN_ALIGNED_STARTS * len(starts)
+
+
+def _region_text(region, vocab: set[str]) -> str:
+    """Text of a page (or part of one): two prose columns are read left column, then right column,
+    full-width lines (words crossing the gap, e.g. a title) in their place; wrapped prose lines are
+    joined into whole sentences. Anything else is extracted as it is."""
+    words = region.extract_words()
+    x0, top, x1, bottom = region.bbox
+    gap = _column_gap(words, x0, x1 - x0)
+    if gap is None:
+        text = region.extract_text() or ""
+        if words and len(words) / _lines_of(words) >= PROSE_MIN_WORDS_PER_LINE:
+            return reflow(text, vocab)
+        return text
+    # Bands of full-width lines (a word crosses the gap) split the page into column parts.
+    bands: list[list[float]] = []
+    for w in sorted((w for w in words if w["x0"] < gap < w["x1"]), key=lambda w: w["top"]):
+        if bands and w["top"] - 2 <= bands[-1][1]:
+            bands[-1][1] = max(bands[-1][1], w["bottom"] + 2)
+        else:
+            bands.append([w["top"] - 2, w["bottom"] + 2])
+    parts, y = [], top
+    for b_top, b_bottom in bands + [[bottom, bottom]]:
+        b_top, b_bottom = max(b_top, top), min(b_bottom, bottom)
+        if b_top > y:
+            for left, right in ((x0, gap), (gap, x1)):
+                parts.append(region.crop((left, y, right, b_top)).extract_text() or "")
+        if b_bottom > b_top:
+            parts.append(region.crop((x0, b_top, x1, b_bottom)).extract_text() or "")
+        y = max(y, b_bottom)
+    # Joined after putting the columns in order: a sentence that runs from the bottom of the left
+    # column to the top of the right one becomes one line too.
+    return reflow("\n".join(p for p in parts if p.strip()), vocab)
+
+
+def reflow(text: str, vocab: set[str] = frozenset()) -> str:
+    """Join lines that were wrapped in the middle of a sentence, so every line is a whole sentence,
+    paragraph or list item. A word split by a hyphen at a line break is joined ("lad-" + "der" =
+    "ladder"); a real compound keeps its hyphen ("slip-" + "resistant" = "slip-resistant").
+    Only that hyphen is ever removed: digits, units and all other characters stay as they are."""
+    out: list[str] = []
+    for line in (ln.strip() for ln in text.splitlines()):
+        if not line:
+            continue
+        prev = out[-1] if out else ""
+        if prev and not LINE_END_RE.search(prev) and not LIST_START_RE.match(line):
+            split = re.search(r"([A-Za-z]+)-$", prev)
+            first = re.match(r"[a-z]+", line)
+            if split and first:
+                joined = (split.group(1) + first.group()).lower()
+                if first.group() in WORD_ENDINGS or joined in vocab:
+                    out[-1] = prev[:-1] + line  # a word split at the line break
+                else:
+                    out[-1] = prev + line  # a hyphenated compound: keep the hyphen
+                continue
+            if line[0].islower() or line[0].isdigit() or line[0] in "(\"“'":
+                out[-1] = f"{prev} {line}"
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def text_layer_pages(path: Path) -> set[int]:
+    """Numbers of the PDF pages read from their own text (not scans): these are read again when
+    the text layout changes; OCR'd pages keep their cached text."""
+    import pdfplumber
+
+    pages = set()
+    with pdfplumber.open(path) as pdf:
+        for n, page in enumerate(pdf.pages, 1):
+            if not is_scanned_page(page) and len((page.extract_text() or "").strip()) >= MIN_CHARS_PER_PAGE:
+                pages.add(n)
+            page.close()
+    return pages
 
 
 def is_scanned_page(page) -> bool:

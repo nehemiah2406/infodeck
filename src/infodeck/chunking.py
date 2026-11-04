@@ -7,7 +7,8 @@ Structure first, size second:
 2. Blocks that fit are packed together into chunks of at most `size` characters.
 3. Only a block that is too long is split (by line, then sentence, then word).
    Every part starts with the block's title, rows of a Markdown table repeat
-   the table's header, and plain text parts overlap a little.
+   the table's header, and plain text parts overlap by whole sentences, so a
+   chunk always starts and ends at a full sentence.
 
 Chunks never cross a page boundary, so every chunk has exactly one page number to cite.
 """
@@ -26,6 +27,11 @@ SUBITEM_RE = re.compile(r"^\(\s*(?:\d{1,2}|[a-z])\s*\)")  # "(1)", "(a)"
 QUESTION_RE = re.compile(r"^(?:Q\s*\d*\s*[.:)]|Question\s*\d*\s*[.:)])\s*\S", re.IGNORECASE)
 TABLE_SEPARATOR_RE = re.compile(r"^\|?\s*:?-{3,}")
 MAX_TITLE_PREFIX = 160
+# Where a new sentence (or line, or list item) starts: after . ! ? followed by a space, at a line
+# break, or before a bullet. "10.6" is not a break (no space after the point).
+SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?])\s+|\n|\s+(?=•\s)")
+# Splitting one over-long line may also cut after a clause ending in ";".
+LONG_LINE_BREAK_RE = re.compile(r"(?<=[.!?;])\s+|\s+(?=•\s)")
 
 
 @dataclass
@@ -85,7 +91,7 @@ def _split_long(unit: str, size: int) -> list[str]:
     if len(unit) <= size:
         return [unit]
     pieces, current = [], ""
-    for sentence in re.split(r"(?<=[.!?;])\s+", unit):
+    for sentence in LONG_LINE_BREAK_RE.split(unit):
         while len(sentence) > size:  # a single huge "sentence": cut at a word boundary
             cut = sentence.rfind(" ", 0, size)
             cut = cut if cut > 0 else size
@@ -105,12 +111,15 @@ def _split_long(unit: str, size: int) -> list[str]:
 
 
 def _tail(text: str, overlap: int) -> str:
-    """Last ~overlap characters of text, starting at a word boundary."""
-    if overlap <= 0 or len(text) <= overlap:
-        return text if overlap > 0 else ""
-    tail = text[-overlap:]
-    space = tail.find(" ")
-    return tail[space + 1:] if 0 <= space < len(tail) - 1 else tail
+    """The last whole sentences (or lines) of text, at most ~overlap characters, so a chunk never
+    starts in the middle of a sentence; '' if the last sentence alone is longer."""
+    if overlap <= 0:
+        return ""
+    if len(text) <= overlap:
+        return text
+    starts = [m.end() for m in SENTENCE_BREAK_RE.finditer(text)]
+    start = next((s for s in starts if len(text) - s <= overlap), None)
+    return text[start:].strip() if start is not None else ""
 
 
 def _join(*parts: str) -> str:

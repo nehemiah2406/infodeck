@@ -6,8 +6,8 @@ Upload PDFs (text or scanned), Word, Excel, PowerPoint, text files or photos, an
 questions in plain English, such as *"What is the hotel limit per night in Mumbai?"* or
 *"What is the grip stress corresponding to Pd?"*. InfoDeck finds the relevant paragraphs and
 answers **only from your documents**. Every answer cites the file and page it came from. If
-the documents don't contain the answer, InfoDeck says *"I could not find this in the
-documents."* instead of guessing. Values, units and formulas are copied exactly as written,
+the documents don't contain the answer, InfoDeck says *"Not in this document."* instead of
+guessing. Values, units and formulas are copied exactly as written,
 never calculated or rounded.
 
 ![InfoDeck screenshot](docs/screenshot.png)
@@ -34,7 +34,7 @@ an AI. Instead, it first finds the few paragraphs that matter and sends only tho
  Question ─► matches a stored value / Q&A pair? ─yes─► "Exact value": value, unit, formula, source line
                  │ no
                  ▼
-          20 most similar chunks ─► best match too weak? ─► "I could not find this in the documents."
+          20 most similar chunks ─► best match too weak? ─► "Not in this document."
                                             │ no
                                             ▼
                         re-ranker picks the best 5 chunks

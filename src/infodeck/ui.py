@@ -30,6 +30,9 @@ EXACT_HIGH_MARGIN = 0.10  # exact value: High if the match score is this far abo
 PASSAGE_HIGH_MARGIN = 0.15
 PASSAGE_MEDIUM_MARGIN = 0.05
 QUOTE_LABEL = "Exact text from the document"
+LONG_QUOTE = 200  # an exact value's source line longer than this is cut to the sentence with the value
+ONE_SENTENCE_MIN = 25  # characters: shorter first "sentences" ("U.S.") are joined with the next
+SENTENCE_RE = re.compile(r"(?<=[.!?;])\s+(?=\S)|\s+(?=•\s)")
 SNIPPET_LINES = 3
 LONG_LINE = 300  # a "line" longer than this is split into sentences for the snippet
 WORD_RE = re.compile(r"\w+(?:[.,]\d+)*")
@@ -123,20 +126,21 @@ class CardView:
 def card_view(ans: Answer, question: str, min_score: float) -> CardView:
     if ans.mode == "exact" and ans.fact:
         f: Fact = ans.fact
-        return CardView("exact", exact_answer_html(f), ans.text, f.file_name, f.page,
-                        mark_value(f.line, f.value), f.line)
+        return CardView("exact", exact_answer_html(f), ans.text, f.file_name, f.page, *exact_quote(f))
     if ans.mode in AI_MODES:
-        text = clean_ai_text(ans.text)
+        text = one_sentence(clean_ai_text(ans.text))
         view = CardView("ai", _key_numbers(text), text)
         if ans.passages:
-            best = ans.passages[0]  # the first passage the answer cites
+            numbers = _numbers(text)  # the cited passage that holds the answer's numbers, else the first
+            best = next((p for p in ans.passages if any(_has_number(p.text, n) for n in numbers)), ans.passages[0])
             view.file_name, view.page = best.file_name, best.page
-            view.quote_html, view.quote_text = snippet(best.text, question)[0], snippet_text(best.text, question)
+            view.quote_html, view.quote_text = answer_quote(best.text, question, text)
         return view
     if ans.mode == "sources" and ans.passages and is_strong(ans.passages[0], min_score):
         best = ans.passages[0]  # AI off, failed or not checked: the best passage, without any message
-        return CardView("passage", file_name=best.file_name, page=best.page,
-                        quote_html=snippet(best.text, question)[0], quote_text=snippet_text(best.text, question))
+        quote_html, quote_text = answer_quote(best.text, question)
+        return CardView("passage", file_name=best.file_name, page=best.page, quote_html=quote_html,
+                        quote_text=quote_text)
     if ans.mode in ("not_found", "sources"):
         return CardView("not_found", message=NOT_FOUND)
     return CardView("error", message=ans.text)
@@ -172,6 +176,57 @@ def mark_value(line: str, value: str) -> str:
     if i < 0:
         return esc(line)
     return f"{esc(line[:i])}<mark class='val'>{esc(value)}</mark>{esc(line[i + len(value):])}"
+
+
+def exact_quote(f: Fact) -> tuple[str, str]:
+    """(HTML, text) of the exact value's source line, with the value marked; a long line (a whole
+    paragraph of prose) is cut down to the sentence that holds the value."""
+    line = f.line
+    if len(line) > LONG_QUOTE:
+        line = next((s for s in _sentences(line) if f.value and f.value in s), line)
+    return mark_value(line, f.value), line
+
+
+def answer_quote(text: str, question: str, answer: str = "") -> tuple[str, str]:
+    """(HTML, text) of only the sentence(s) of a passage that hold the answer: those with the answer's
+    numbers (at most two), else the one sentence that matches the question best. Exact document text."""
+    sentences = _sentences(text) or [text.strip()]
+    words = _content_words(question)
+    picked = [s for s in sentences if any(_has_number(s, n) for n in _numbers(answer))][:2]
+    if not picked:
+        hits = [len({_stem(w) for w in WORD_RE.findall(s)} & words) for s in sentences]
+        picked = [sentences[max(range(len(sentences)), key=lambda i: (hits[i], -i))]]
+    return "<br>".join(_highlight(s, words) for s in picked), "\n".join(picked)
+
+
+def _sentences(text: str) -> list[str]:
+    """The sentences and list items of a text, each exactly as written (lines are split further at
+    '. ' and before bullets; '10.6' is not split)."""
+    out = []
+    for line in text.splitlines():
+        out += [s.strip() for s in SENTENCE_RE.split(line) if s.strip() and s.strip() != "•"]
+    return out
+
+
+def _numbers(text: str) -> list[str]:
+    return list(dict.fromkeys(n.rstrip(",.") for n in NUMBER_RE.findall(text) if n.rstrip(",.")))
+
+
+def _has_number(text: str, number: str) -> bool:
+    return bool(re.search(rf"(?<![\d.,]){re.escape(number)}(?!\d)", text))
+
+
+def one_sentence(text: str) -> str:
+    """The first sentence of an AI answer (the answer line is one short sentence). A first "sentence"
+    shorter than ONE_SENTENCE_MIN characters (e.g. "U.S.") is not cut off."""
+    flat = " ".join(text.split())
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z\"“])", flat)
+    first = ""
+    for part in parts:
+        first = f"{first} {part}".strip()
+        if len(first) >= ONE_SENTENCE_MIN:
+            return first
+    return first
 
 
 def clean_ai_text(text: str) -> str:

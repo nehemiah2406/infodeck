@@ -7,7 +7,7 @@ Metrics (no LLM / API key needed):
 - Retrieval hit rate @5: answerable questions whose expected file + page is in the top 5 passages.
 - Hit rate @1: same, but only the first passage counts.
 - "Not found" accuracy: questions NOT in the documents that are correctly answered
-  "I could not find this in the documents." (best vector score below MIN_SCORE).
+  "Not in this document." (best vector score below MIN_SCORE).
 - False "not found": answerable questions wrongly rejected by the threshold.
 A threshold sweep shows how MIN_SCORE trades these off.
 """

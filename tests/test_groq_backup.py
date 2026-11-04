@@ -189,7 +189,7 @@ def test_exact_value_card_still_comes_first_and_no_ai_is_called(engine, tmp_path
 
 def test_not_found_answers_stay_not_found(bolts):
     ans = bolts.answer(QUESTION, chain(FailingGemini(server_error(503)),
-                                       FakeGroq("I could not find this in the documents.")))
+                                       FakeGroq("Not in this document.")))
     assert ans.mode == "not_found"
 
 

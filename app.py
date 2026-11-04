@@ -52,6 +52,7 @@ def get_engine() -> InfoDeckEngine:
     for r in engine.load_samples_once():
         log.info("Sample document: %s", r.message)
     engine.self_test_unchecked()  # documents loaded before the exact-value self-test existed
+    engine.reread_outdated()  # PDFs read before 2-column pages were read column by column
     return engine
 
 

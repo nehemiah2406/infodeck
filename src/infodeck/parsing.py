@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .config import Settings
 from .gemini_parser import GeminiPageReader, ParseError
-from .loaders import IMAGE_EXTENSIONS, MIN_CHARS_PER_PAGE, LoadedDocument, Page, Progress, load_document
+from .loaders import IMAGE_EXTENSIONS, LAYOUT, MIN_CHARS_PER_PAGE, LoadedDocument, Page, Progress, load_document
 from .ocr import broken_numbers
 
 log = logging.getLogger(__name__)
@@ -52,6 +52,10 @@ def parse_document(path: Path, name: str, doc_id: str, settings: Settings,
     if meta.get("parser") != parser:  # parsed before with another parser/model: start again
         shutil.rmtree(out, ignore_errors=True)
         meta = {}
+    if meta.get("complete") and layout_outdated(meta):
+        log.info("Reading %s again: it was read before 2-column pages were read column by column", name)
+        shutil.rmtree(out, ignore_errors=True)
+        meta = {}
     if meta.get("complete") and parser == "local" and pages_to_recheck(out, meta):
         log.info("Reading %s again: its cached pages have broken OCR numbers", name)
         shutil.rmtree(out, ignore_errors=True)
@@ -68,8 +72,14 @@ def parse_document(path: Path, name: str, doc_id: str, settings: Settings,
         doc = _parse_with_gemini(path, name, out, settings, progress, gemini_client)
     write_meta(out, {"file_name": name, "parser": parser, "complete": True, "page_count": doc.page_count,
                       "pages": [p.number for p in doc.pages], "warnings": doc.warnings,
-                      "number_check": NUMBER_CHECK})
+                      "number_check": NUMBER_CHECK, "layout": LAYOUT})
     return doc
+
+
+def layout_outdated(meta: dict) -> bool:
+    """A local PDF parse made before the current text layout (LAYOUT): its text pages are read again."""
+    return (meta.get("parser") == "local" and str(meta.get("file_name", "")).lower().endswith(".pdf")
+            and meta.get("layout") != LAYOUT)
 
 
 def pages_to_recheck(folder: Path, meta: dict) -> list[int]:

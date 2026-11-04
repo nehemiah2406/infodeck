@@ -29,9 +29,11 @@ from .facts import Fact, FactExtractor, extract_facts, format_fact_answer, match
 from .gemini_parser import ParseError
 from .jobs import IngestJob, IngestQueue, JobCancelled
 from .llm import PROVIDER_NAMES, BackupChain, LLMError, LLMStatus
-from .loaders import (HEADER_SAMPLE_PAGES, MIN_CHARS_PER_PAGE, SUPPORTED_EXTENSIONS, Page, Progress,
-                      UnsupportedFileError, iter_pdf_pages, pdf_warnings, repeated_lines, strip_lines)
-from .parsing import NUMBER_CHECK, is_partial, pages_to_recheck, parse_document, read_meta, write_meta
+from .loaders import (HEADER_SAMPLE_PAGES, LAYOUT, MIN_CHARS_PER_PAGE, SUPPORTED_EXTENSIONS, Page, Progress,
+                      UnsupportedFileError, iter_pdf_pages, pdf_warnings, repeated_lines, strip_lines,
+                      text_layer_pages)
+from .parsing import (NUMBER_CHECK, is_partial, layout_outdated, pages_to_recheck, parse_document, read_meta,
+                      write_meta)
 from .prompts import NOT_FOUND, SOURCES_MODE_NOTE, SYSTEM_PROMPT, build_user_prompt
 from .store import Passage, VectorStore, file_hash
 
@@ -247,6 +249,8 @@ class InfoDeckEngine:
         job = self.jobs.get(doc_id)
         if job and job.active:
             return False
+        if layout_outdated(read_meta(self.settings.parsed_dir / doc_id)):
+            return False  # read with the old page layout: read again (the reader replaces its chunks)
         if is_partial(self.settings, doc_id):
             log.info("Removing the half-indexed leftover of an interrupted upload (%s)", doc_id)
             self.store.remove_document(doc_id)
@@ -285,6 +289,15 @@ class InfoDeckEngine:
         if meta.get("parser") != "local":  # parsed before with another parser: start again
             shutil.rmtree(out, ignore_errors=True)
             meta = {}
+        if meta.get("complete") and layout_outdated(meta):
+            # Read before 2-column pages were read column by column: read its text pages again (fast);
+            # scanned pages keep their OCR text. It is searchable again page by page as it is read.
+            log.info("Reading %s again with the new page layout (OCR'd pages are kept)", name)
+            self.store.remove_document(doc_id)
+            for n in text_layer_pages(path):
+                (out / f"page_{n}.md").unlink(missing_ok=True)
+            meta = {**meta, "complete": False}
+            write_meta(out, meta)
         if meta.get("complete"):  # read completely before: index it from the parse cache
             stale = pages_to_recheck(out, meta)
             if not stale:
@@ -353,7 +366,8 @@ class InfoDeckEngine:
         self.self_test_facts(doc_id, name)  # all exact values are in now
         warnings = pdf_warnings(name, all_pages, ocr_pages)
         write_meta(out, {"file_name": name, "parser": "local", "complete": True, "page_count": total,
-                         "pages": [p.number for p in kept], "warnings": warnings, "number_check": NUMBER_CHECK})
+                         "pages": [p.number for p in kept], "warnings": warnings, "number_check": NUMBER_CHECK,
+                         "layout": LAYOUT})
         if not kept:
             msg = warnings[0] if warnings else f"{name} contains no text."
             return IngestResult("no_text", name, msg, pages=total, warnings=warnings)
@@ -397,6 +411,22 @@ class InfoDeckEngine:
                 src.unlink(missing_ok=True)
         except OSError:
             log.warning("Could not delete uploaded file %s", src.name)
+
+    def reread_outdated(self) -> int:
+        """Queue PDFs read before the current page layout (2-column pages column by column) to be read
+        again in the background, one at a time. Returns how many were queued."""
+        if self.settings.parser != "local":
+            return 0
+        queued = 0
+        for d in self.store.list_documents():
+            meta = read_meta(self.settings.parsed_dir / d.doc_id)
+            source = Path(d.source_path)
+            if meta.get("complete") and layout_outdated(meta) and source.is_file():
+                self.jobs.submit(d.doc_id, d.file_name, source)
+                queued += 1
+        if queued:
+            log.info("Reading %d document(s) again with the new page layout", queued)
+        return queued
 
     def load_samples_once(self) -> list[IngestResult]:
         """Load the sample PDFs on the very first start (not again if the user removes them)."""
