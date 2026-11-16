@@ -27,8 +27,8 @@ from infodeck.llm import BackupChain, LLMError, resolve_llm  # noqa: E402
 from infodeck.prompts import NOT_FOUND  # noqa: E402
 from infodeck.qa_log import log_answer  # noqa: E402
 from infodeck.store import VectorStore  # noqa: E402
-from infodeck.ui import (CardView, Trace, card_html, card_view, copy_button_html, document_list,  # noqa: E402
-                         document_list_html, esc, skeleton_html, topbar_html)
+from infodeck.ui import (CardView, Trace, card_html, card_view, copy_button_html, document_list_html,  # noqa: E402
+                         document_rows, esc, skeleton_html, topbar_html)
 
 log = logging.getLogger("infodeck.app")
 
@@ -139,6 +139,41 @@ def ingest_files(engine: InfoDeckEngine, files, where: str) -> list[tuple[str, s
             else:
                 notes += upload_notes(job.result)
     return notes
+
+
+def document_panel(engine: InfoDeckEngine, docs) -> None:
+    """The loaded documents, one line each with a 🗑 button. 🗑 asks "Delete <name>?" (Yes / Cancel)
+    on that line; Yes removes the document from search and deletes its uploaded copy in data/uploads
+    (engine.remove_document never deletes the sample documents from disk, and stops a document that
+    is still being read before removing it)."""
+    ss = st.session_state
+    rows = document_rows(docs, engine.jobs.active())
+    if not rows:
+        return
+    st.markdown("<div class='id-docs'></div>", unsafe_allow_html=True)
+    for doc_id, name, reading in rows:
+        if ss.get("confirm_delete") == doc_id:
+            st.markdown(f"<div class='id-del-ask'>Delete <b>{esc(name)}</b>?</div>", unsafe_allow_html=True)
+            yes, cancel = st.columns(2)
+            if yes.button("Yes", key=f"del_yes_{doc_id}", use_container_width=True):
+                ss.confirm_delete = None
+                try:
+                    engine.remove_document(doc_id)
+                    ss.upload_notes = [("sidebar", "ok", f"{name} was deleted.")]
+                except Exception:  # never crash the app over a delete
+                    log.exception("Could not delete %s", name)
+                    ss.upload_notes = [("sidebar", "error", f"{name} could not be deleted. Please try again.")]
+                ss.watch.pop(doc_id, None)
+                st.rerun()
+            if cancel.button("Cancel", key=f"del_no_{doc_id}", use_container_width=True):
+                ss.confirm_delete = None
+                st.rerun()
+            continue
+        left, right = st.columns([6, 1], vertical_alignment="center")
+        left.markdown(document_list_html([(name, reading)]), unsafe_allow_html=True)
+        if right.button("🗑", key=f"del_{doc_id}", help=f"Delete {name}"):
+            ss.confirm_delete = doc_id
+            st.rerun()
 
 
 @st.fragment(run_every=2)
@@ -259,7 +294,7 @@ def main() -> None:
         files = st.file_uploader("Upload", type=UPLOAD_TYPES, accept_multiple_files=True,
                                  key=f"uploader_{ss.uploader_key}", label_visibility="collapsed")
         st.markdown(f"<div class='id-types'>{UPLOAD_HINT}</div>", unsafe_allow_html=True)
-        st.markdown(document_list_html(document_list(docs, engine.jobs.active())), unsafe_allow_html=True)
+        document_panel(engine, docs)
         if files:
             ss.upload_notes = [("sidebar", *n) for n in ingest_files(engine, files, "sidebar")]
             ss.uploader_key += 1  # clears the upload box

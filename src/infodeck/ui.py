@@ -69,10 +69,15 @@ READING = "Reading..."
 def document_list(docs, active_jobs) -> list[tuple[str, bool]]:
     """(file name, still being read) per document: every loaded document (also those loaded before a
     refresh or restart), then files still waiting or being read that have no searchable pages yet."""
+    return [(name, reading) for _, name, reading in document_rows(docs, active_jobs)]
+
+
+def document_rows(docs, active_jobs) -> list[tuple[str, str, bool]]:
+    """The same lines as document_list(), with each document's doc_id first (for its delete button)."""
     reading = {j.doc_id: j.file_name for j in active_jobs}
     loaded = {d.doc_id for d in docs}
-    return ([(d.file_name, d.doc_id in reading) for d in docs] +
-            [(name, True) for doc_id, name in reading.items() if doc_id not in loaded])
+    return ([(d.doc_id, d.file_name, d.doc_id in reading) for d in docs] +
+            [(doc_id, name, True) for doc_id, name in reading.items() if doc_id not in loaded])
 
 
 def document_list_html(items: list[tuple[str, bool]]) -> str:

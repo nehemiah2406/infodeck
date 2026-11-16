@@ -57,6 +57,16 @@ p, li { color: var(--text); }
     color: var(--text); border-bottom: 1px solid rgba(42, 26, 28, .06); }
 .id-doc .name { overflow-wrap: anywhere; }
 .id-doc .reading { flex: none; margin-left: auto; font-size: .74rem; font-style: italic; color: var(--maroon); }
+/* One document per row (name + 🗑): rows sit close together; the ask line "Delete X?" + Yes / Cancel */
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has(.id-doc) { gap: .3rem; margin-bottom: -.8rem; }
+[data-testid="stColumn"] .id-docs { margin: 0; padding: 0; border-top: none; }
+[data-testid="stColumn"] .id-doc { border-bottom: none; }
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has(.id-doc) .stButton > button {
+    min-height: 0 !important; padding: .1rem .35rem !important; border: none !important;
+    background: transparent !important; font-size: .85rem; opacity: .55;
+}
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has(.id-doc) .stButton > button:hover { opacity: 1; }
+.id-del-ask { font-size: .86rem; color: var(--maroon); padding: .32rem 0 0 0; overflow-wrap: anywhere; }
 /* The upload drop zone becomes one maroon "Upload" button */
 [data-testid="stFileUploaderDropzone"] {
     background: transparent !important; border: none !important; padding: 0 !important;
