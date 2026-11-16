@@ -71,7 +71,9 @@ def test_ai_card_has_the_same_parts_and_drops_citations_but_not_numbers():
     assert view.answer_text == "The hotel limit in Mumbai is INR 7,500 per night."
     assert "<span class='key'>7,500</span>" in html and "[KRT_Travel.pdf" not in html
     assert "<mark>Mumbai</mark>" in html  # the quote: exact passage lines, question words marked
-    assert "4. Accommodation" in view.quote_text  # passage text is quoted as is ...
+    # the quote is only the passage sentence with the answer, exactly as written (no heading) ...
+    assert view.quote_text == "Hotel limit in Mumbai: INR 7,500 per night"
+    assert "4. Accommodation" not in html
     assert "<span class='file'>KRT_Travel.pdf</span><span class='sep'>·</span>p. 3</div>" in html  # ... no section
     assert_nothing_removed_is_shown(html.replace("4. Accommodation", ""))
 

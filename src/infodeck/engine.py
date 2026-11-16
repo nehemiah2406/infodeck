@@ -249,12 +249,12 @@ class InfoDeckEngine:
         job = self.jobs.get(doc_id)
         if job and job.active:
             return False
-        if layout_outdated(read_meta(self.settings.parsed_dir / doc_id)):
-            return False  # read with the old page layout: read again (the reader replaces its chunks)
-        if is_partial(self.settings, doc_id):
+        if is_partial(self.settings, doc_id):  # checked first: an old-layout leftover is removed too
             log.info("Removing the half-indexed leftover of an interrupted upload (%s)", doc_id)
             self.store.remove_document(doc_id)
             return False
+        if layout_outdated(read_meta(self.settings.parsed_dir / doc_id)):
+            return False  # read with the old page layout: read again (the reader replaces its chunks)
         return True
 
     def _run_job(self, job: IngestJob) -> IngestResult:
@@ -294,7 +294,8 @@ class InfoDeckEngine:
             # scanned pages keep their OCR text. It is searchable again page by page as it is read.
             log.info("Reading %s again with the new page layout (OCR'd pages are kept)", name)
             self.store.remove_document(doc_id)
-            for n in text_layer_pages(path):
+            # also the OCR'd pages with broken numbers ("10).6") if the cache is from before that fix
+            for n in text_layer_pages(path) | set(pages_to_recheck(out, meta)):
                 (out / f"page_{n}.md").unlink(missing_ok=True)
             meta = {**meta, "complete": False}
             write_meta(out, meta)

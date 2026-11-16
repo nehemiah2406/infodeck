@@ -131,6 +131,8 @@ def test_reupload_of_an_old_cache_reads_only_the_broken_pages_again(engine, monk
 
     reader = FakePdfReader()
     monkeypatch.setattr("infodeck.engine.iter_pdf_pages", reader)
+    # a scan has no pages with their own text layer (the fake bytes can't be opened by pdfplumber)
+    monkeypatch.setattr("infodeck.engine.text_layer_pages", lambda path: set())
     r = engine.queue_upload("calc_scan.pdf", data)
     assert r.status == "queued" and engine.jobs.wait(20)
     assert engine.jobs.get(r.doc_id).result.status == "added"

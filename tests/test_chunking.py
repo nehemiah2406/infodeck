@@ -22,8 +22,10 @@ def test_consecutive_chunks_overlap():
     chunks = [c for c in chunk_pages(make_pages(), "policy.pdf", size=800, overlap=150) if c.page == 1]
     assert len(chunks) >= 2
     for a, b in zip(chunks, chunks[1:]):
-        tail = a.text[-100:]
-        assert tail in b.text, "the end of one chunk should be repeated at the start of the next"
+        # overlap is whole sentences: the last sentence of a chunk starts the next (after the section title)
+        last = a.text.splitlines()[-1]
+        assert b.text.splitlines()[:2] == ["1. Purpose and Scope", last], \
+            "the last whole sentence of one chunk should be repeated at the start of the next"
 
 
 def test_every_chunk_keeps_file_name_and_page_and_never_crosses_pages():
