@@ -44,8 +44,8 @@ an AI. Instead, it first finds the few paragraphs that matter and sends only tho
                        │                                         │
        short answer with citations                  "sources mode": shows the
        like [KRT_Leave_Policy.pdf, p.1]             matching passages + file/page
-       + "Check this value in the source" if a
-         number is not in the passages
+       + Gemini/Groq answers are not shown
+         if a number is not in the passages
 ```
 
 ## Features
@@ -57,16 +57,20 @@ an AI. Instead, it first finds the few paragraphs that matter and sends only tho
   shows *Reading file: page X of N*, and you can already ask about the pages that are done.
 - **Exact values:** lines such as `(1) Push-up distance, 10.6 mm` or
   `σra = Pd / Pr x σr = 111 N/mm²`, variable lists and Q&A pairs are indexed separately. A
-  matching question is answered straight from the document line (pill **Exact value**),
-  without the AI, showing value, unit, formula and source.
-- **Number check:** every number in an AI answer must appear in the retrieved passages;
-  otherwise the answer shows *"Check this value in the source"*.
+  matching question is answered straight from the document line, without the AI: the card shows
+  the value's name with the value and unit in maroon, the file + page, and the document line
+  under *"Exact text from the document"*.
+- **Number check:** every number in a Gemini or Groq answer must appear in the retrieved
+  passages, and a source must be cited. Otherwise the AI answer is not shown: the card shows the
+  best matching passage instead (only if it is a strong match, else *"Not in this document."*).
+  Claude and Ollama answers are checked the same way, but the card does not show the result yet.
 - Uploading the same file again is detected by its fingerprint (SHA-256 hash), so nothing is duplicated.
 - **Delete a document:** each file in the sidebar list has a 🗑 button. It asks *"Delete <name>?"*
   (Yes / Cancel). Yes removes the file from search and deletes its uploaded copy in `data/uploads/`.
   Sample documents are only removed from the list, never from disk. A file still being read is
   stopped first.
-- Answers cite **file + page**. A **Sources** panel shows the exact paragraphs that were used.
+- Answers cite **file + page**. Under *"Exact text from the document"*, the card shows only the
+  sentence(s) of the document that hold the answer, with a **Copy** button.
 - **Four AI modes**, chosen in `.env`:
   - Claude API (default)
   - Gemini first, **Groq as backup**: if Gemini has not started answering within 5 seconds or fails,
@@ -123,8 +127,8 @@ The three sample PDFs load automatically the first time the app starts.
 1. Create a key at <https://console.anthropic.com> (API Keys).
 2. Open the file **`.env`** in the project folder and paste the key after the equals sign:
    `ANTHROPIC_API_KEY=your-key-here` (no quotes, no spaces).
-3. Save the file and **refresh the browser**. You don't need to restart. The sidebar pill
-   changes from *Sources mode* to *Claude*.
+3. Save the file. You don't need to restart or refresh: the **next question** is answered by
+   Claude. The answer card looks the same in every mode (it does not name the AI).
 
 `.env` is listed in `.gitignore`, so it is never committed. The app never prints or logs the key.
 
