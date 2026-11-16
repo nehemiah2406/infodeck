@@ -40,7 +40,7 @@ an AI. Instead, it first finds the few paragraphs that matter and sends only tho
                         re-ranker picks the best 5 chunks
                                             │
                        ┌────────────────────┴────────────────────┐
-              AI available (Claude / Ollama)               no API key yet
+      AI available (Claude / Gemini + Groq / Ollama)        no API key yet
                        │                                         │
        short answer with citations                  "sources mode": shows the
        like [KRT_Leave_Policy.pdf, p.1]             matching passages + file/page
@@ -62,9 +62,15 @@ an AI. Instead, it first finds the few paragraphs that matter and sends only tho
 - **Number check:** every number in an AI answer must appear in the retrieved passages;
   otherwise the answer shows *"Check this value in the source"*.
 - Uploading the same file again is detected by its fingerprint (SHA-256 hash), so nothing is duplicated.
+- **Delete a document:** each file in the sidebar list has a 🗑 button. It asks *"Delete <name>?"*
+  (Yes / Cancel). Yes removes the file from search and deletes its uploaded copy in `data/uploads/`.
+  Sample documents are only removed from the list, never from disk. A file still being read is
+  stopped first.
 - Answers cite **file + page**. A **Sources** panel shows the exact paragraphs that were used.
-- **Three AI modes**, chosen in `.env`:
+- **Four AI modes**, chosen in `.env`:
   - Claude API (default)
+  - Gemini first, **Groq as backup**: if Gemini has not started answering within 5 seconds or fails,
+    Groq answers in the time left. Each question has a 10-second AI budget.
   - Ollama (free and local)
   - **Sources mode** (no AI): shows the best matching passages. This is used automatically
     when there is no API key, so the app never crashes because a key is missing.
@@ -81,9 +87,9 @@ an AI. Instead, it first finds the few paragraphs that matter and sends only tho
 | Embeddings | `sentence-transformers` + `BAAI/bge-small-en-v1.5` | Small, fast, runs locally on CPU |
 | Re-ranking | `cross-encoder/ms-marco-MiniLM-L6-v2` | Re-orders candidates by how well they answer the question |
 | Vector store | `ChromaDB` (persistent folder) | Local, no server needed |
-| LLM | `anthropic` (Claude, default `claude-sonnet-5-5`), `google-genai` (Gemini) or `ollama` | Answers streamed live; only 5 short passages are sent |
+| LLM | `anthropic` (Claude, default `claude-sonnet-5-5`), `google-genai` (Gemini `gemini-3.8-flash`) with Groq (`openai/gpt-oss-120b`) as backup, or `ollama` | Only 5 short passages are sent |
 | UI | `Streamlit` | Chat web app; other people on the network can open it |
-| Tests | `pytest` | 70 fast tests with the LLM and Gemini mocked: no API key or internet needed |
+| Tests | `pytest` | 167 fast tests with the LLM and Gemini mocked: no API key or internet needed |
 
 ## Run it on Windows
 
@@ -127,6 +133,12 @@ then set `LLM_PROVIDER=ollama` and `OLLAMA_MODEL=llama3.2:3b` in `.env`.
 
 **Google Gemini:** create a key at <https://aistudio.google.com/apikey>, then set
 `LLM_PROVIDER=gemini` and `GEMINI_API_KEY=your-key-here` in `.env`.
+
+**Groq backup for Gemini:** create a key at <https://console.groq.com/keys> and also set
+`GROQ_API_KEY=your-key-here`. Gemini answers first. If it has not started within
+`GEMINI_MAX_WAIT_SECONDS` (5 s) or fails, Groq (`GROQ_MODEL`) answers in the time left of
+`AI_BUDGET_SECONDS` (10 s per question). After 2 Gemini failures in a row, Gemini is skipped
+and tried again every 5th question. `LLM_PROVIDER=groq` uses Groq alone.
 
 ## Supported files
 
@@ -180,7 +192,12 @@ These files are also the parse cache. Delete a document's folder to force it to 
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `LLM_PROVIDER` | `anthropic` | `anthropic`, `gemini` or `ollama` |
+| `LLM_PROVIDER` | `anthropic` | `anthropic`, `gemini` (with Groq backup if `GROQ_API_KEY` is set), `groq` or `ollama` |
+| `GEMINI_MAX_WAIT_SECONDS` | `5` | Gemini must start answering within this time, else Groq answers |
+| `GEMINI_TIMEOUT_SECONDS` | `15` | Time limit per Gemini request |
+| `GROQ_API_KEY` | (empty) | Groq key: backup when Gemini is slow or fails |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model |
+| `AI_BUDGET_SECONDS` | `10` | Total AI time per question (Gemini + Groq) |
 | `CLAUDE_MODEL` | `claude-sonnet-5-5` | Claude model used for answers |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Gemini model used when `LLM_PROVIDER=gemini` or `PARSER=gemini` |
 | `PARSER` | `local` | `local` (text + local OCR) or `gemini` (page images read by Gemini, see above) |
@@ -260,8 +277,9 @@ also reject real questions, so `0.55` was kept. With Claude enabled, the prompt 
 ## Tests
 
 ```powershell
-.venv\Scripts\python -m pytest            # 80 fast tests, LLM and Gemini mocked
-.venv\Scripts\python -m pytest -m slow    # 6 tests with the real embedding + re-ranking models
+.venv\Scripts\python -m pytest            # 167 fast tests, LLM and Gemini mocked
+.venv\Scripts\python -m pytest -m slow    # 7 slow tests: 6 with the real embedding + re-ranking models,
+                                          # 1 with the real 5-second Gemini wait
 ```
 
 The tests cover every file loader, local OCR, Gemini page parsing with a fake client (only
